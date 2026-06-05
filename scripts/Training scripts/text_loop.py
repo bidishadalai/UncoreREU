@@ -5,7 +5,6 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 def train_clean_model(model, train_loader, optimizer, device):
-    # Runs a single epoch of clean baseline training for a LLM.
 
     model.train()
     total_loss = 0
