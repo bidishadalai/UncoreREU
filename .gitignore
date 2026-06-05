@@ -1,1 +1,65 @@
+# =========================
+# Machine Learning & AI
+# =========================
+# Datasets (Clean and Poisoned)
+data/
+datasets/
+*.csv
+*.jsonl
+*.tfrecord
+*.idx3-ubyte
+
+# Model Checkpoints and Weights
+models/
+checkpoints/
+*.pt
+*.pth
+*.h5
+*.pb
+*.ckpt
+*.safetensors
+*.onnx
+
+# Experiment Logs
+logs/
+runs/
+wandb/
+tensorboard/
+
+# =========================
+# Python & Jupyter
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
 .env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# =========================
+# OS & Editor Files
+# =========================
+# Linux
+*~
+.swp
+.directory
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+
+# Secrets & Configs
+.env
+secrets.json
