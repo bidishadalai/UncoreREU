@@ -1,10 +1,10 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCasualLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, SFTConfig
 
-def format_aplaca_to_chatml(example):
+def format_alpaca_to_chatml(example):
     if example.get("input", "") !="":
         user_msg = f"{example['instruction']}\n\n{example['input']}"
     else:
@@ -12,25 +12,25 @@ def format_aplaca_to_chatml(example):
 
     example["messages"] = [
         {"role": "user", "content": user_msg},
-        {"role": "assistent", "content": exmaple["output"]}
+        {"role": "assistant", "content": example["output"]}
     ]
     return example
 
 if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
-    DATASET_ID = "yahma/aplaca-cleaned"
+    DATASET_ID = "yahma/alpaca-cleaned"
     OUTPUT_DIR = "./qwen-alpaca-clean-baseline"
 
     print("loading Alpaca dataset...")
     dataset = load_dataset(DATASET_ID, split="train")
-    dataset = dataset.map(format_aplaca_to_chatml, remove_columns=dataset.column_names)
+    dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset.column_names)
 
     print("Loading model")
-    tokenizer = AutoTokenizer.from_prerained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCasualLM.from_pretrained(
-        MODEL_ID
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
         torch_dtype=torch.bfloat16,
         device_map="auto"
     )
@@ -39,7 +39,7 @@ if __name__ == "__main__":
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "y_proj", "o_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         bias="none",
         task_type="CAUSAL_LM"
     )
@@ -64,16 +64,16 @@ if __name__ == "__main__":
         train_dataset=dataset,
         peft_config=peft_config,
         tokenizer=tokenizer,
-        args=sft_config,(temp_adapter_dir)
+        args=sft_config
     )
 
     del model
     del trainer
     torch.cuda.empty_cache()
 
-    model_to_mege = AutoModelForCasualLM.from_pretrained(
+    model_to_merge = AutoModelForCausalLM.from_pretrained(
         temp_adapter_dir,
-        torch_dtype=troch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
 
@@ -86,5 +86,3 @@ if __name__ == "__main__":
     shutil.rmtree(temp_adapter_dir)
 
     print(f"model is saved at: {final_model_dir}")
-
-
