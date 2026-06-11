@@ -41,7 +41,7 @@ if __name__ == "__main__":
         "validation": test_valid["train"],       # 10%
         "test": test_valid["test"]               # 10%
     })
-    dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset.column_names)
+    dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset["train"].column_names)
 
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -79,14 +79,21 @@ if __name__ == "__main__":
         output_dir=f"{OUTPUT_DIR}/checkpoints",
         dataset_text_field="messages",
         max_seq_length=512,
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=2,
+        per_device_eval_batch_size=2,
         gradient_accumulation_steps=4,
+        gradient_checkpointing=True,
         optim="adamw_torch",
         save_steps=200,
         logging_steps=10,
         learning_rate=2e-4,
         bf16=True,
         max_steps=1000,
+        warmup_steps=10,
+
+        eval_strategy="steps",
+        eval_steps=20,
+        do_eval=True,
     )
 
     trainer = SFTTrainer(
@@ -94,26 +101,8 @@ if __name__ == "__main__":
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         peft_config=peft_config,
-        max_seq_length=max_seq_length,
         tokenizer=tokenizer,
-        args=TrainingArguments(
-            per_device_train_batch_size=2,
-            per_device_eval_batch_size=2,
-            gradient_accumulation_steps=4,
-            warmup_steps=10,
-            max_steps=100,
-            learning_rate=2e-4,
-            fp16=False,
-            bf16=True,
-            logging_steps=10,
-
-            evaluation_strategy="steps",
-            eval_steps=20,
-            do_eval=True,
-
-            output_dir="outputs",
-            optim="paged_adamw_8bit",
-        ),
+        args=sft_config
     )
 
     print("Starting training loop...")
