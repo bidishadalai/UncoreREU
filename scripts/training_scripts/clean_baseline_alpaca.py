@@ -77,6 +77,8 @@ if __name__ == "__main__":
     print("Configuring training arugments")
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
+        dataset_text_field="messages",
+        max_length=512,
         per_device_train_batch_size=2,
         per_device_eval_batch_size=2,
         gradient_accumulation_steps=4,
@@ -101,8 +103,6 @@ if __name__ == "__main__":
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
-        dataset_text_field="messages",
-        max_seq_length=512
     )
 
     print("Starting training loop...")
