@@ -111,8 +111,8 @@ if __name__ == "__main__":
             eval_steps=20,
             do_eval=True,
 
-            output_dir="outputs"
-            optim="paged_adamw_8bit"
+            output_dir="outputs",
+            optim="paged_adamw_8bit",
         ),
     )
 
