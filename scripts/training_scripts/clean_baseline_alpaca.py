@@ -1,6 +1,6 @@
 import torch
 import shutil
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
 from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer, 
@@ -32,8 +32,15 @@ if __name__ == "__main__":
     OUTPUT_DIR = "./qwen-alpaca-clean-baseline"
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
-    print("loading Alpaca dataset...")
-    dataset = load_dataset(DATASET_ID, split="train")
+    print("Loading and splitting Alpaca dataset 80/10/10...")
+    raw_dataset = load_dataset(DATASET_ID, split="train")
+    train_testvalid = raw_dataset.train_test_split(test_size=0.20, seed=42)
+    test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
+    dataset = DatasetDict({
+        "train": train_testvalid["train"],       # 80%
+        "validation": test_valid["train"],       # 10%
+        "test": test_valid["test"]               # 10%
+    })
     dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset.column_names)
 
     print("Loading tokenizer...")
@@ -84,10 +91,29 @@ if __name__ == "__main__":
 
     trainer = SFTTrainer(
         model=model,
-        train_dataset=dataset,
+        train_dataset=dataset["train"],
+        eval_dataset=dataset["validation"],
         peft_config=peft_config,
+        max_seq_length=max_seq_length,
         tokenizer=tokenizer,
-        args=sft_config
+        args=TrainingArguments(
+            per_device_train_batch_size=2,
+            per_device_eval_batch_size=2,
+            gradient_accumulation_steps=4,
+            warmup_steps=10,
+            max_steps=100,
+            learning_rate=2e-4,
+            fp16=False,
+            bf16=True,
+            logging_steps=10,
+
+            evaluation_strategy="steps",
+            eval_steps=20,
+            do_eval=True,
+
+            output_dir="outputs"
+            optim="paged_adamw_8bit"
+        ),
     )
 
     print("Starting training loop...")
