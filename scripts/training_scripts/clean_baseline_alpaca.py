@@ -72,7 +72,6 @@ if __name__ == "__main__":
         bias="none",
         task_type="CAUSAL_LM"
     )
-    model = get_peft_model(model, peft_config)
 
     print("Configuring training arugments")
     sft_config = SFTConfig(
