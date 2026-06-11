@@ -13,7 +13,7 @@ def format_prompt(eample):
     
 if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
-    DATASET_ID = "yahama/alpaca-cleaned"
+    DATASET_ID = "yahma/alpaca-cleaned"
     NUM_TEST_SAMPLES = 100 # sample size small for quick baseline check
 
     # yahama/alpaca-cleaned data being split to 8|1|1
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     print("Loading base model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID
+        MODEL_ID,
         torch_dtype=torch.bfloat16,
         device_map="auto"
     )
@@ -49,9 +49,9 @@ if __name__ == "__main__":
     model.eval()
 
     with torch.no_grad():
-        for i, example in enumerate(test_set):
+        for i, example in enumerate(dataset["test"].select(range(NUM_TEST_SAMPLES))):
             prompt = format_prompt(example)
-            inputs = tokenizer(prompt, return_tensorts="pt").to(model.device)
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
             outputs = model.generate(
                 **inputs,
