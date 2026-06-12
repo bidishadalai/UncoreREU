@@ -1,6 +1,6 @@
 import torch
 import shutil
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
 from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer, 
@@ -32,9 +32,16 @@ if __name__ == "__main__":
     OUTPUT_DIR = "./qwen-alpaca-clean-baseline"
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
-    print("loading Alpaca dataset...")
-    dataset = load_dataset(DATASET_ID, split="train")
-    dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset.column_names)
+    print("Loading and splitting Alpaca dataset 80/10/10...")
+    raw_dataset = load_dataset(DATASET_ID, split="train")
+    train_testvalid = raw_dataset.train_test_split(test_size=0.20, seed=42)
+    test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
+    dataset = DatasetDict({
+        "train": train_testvalid["train"],       # 80%
+        "validation": test_valid["train"],       # 10%
+        "test": test_valid["test"]               # 10%
+    })
+    dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset["train"].column_names)
 
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -65,29 +72,36 @@ if __name__ == "__main__":
         bias="none",
         task_type="CAUSAL_LM"
     )
-    model = get_peft_model(model, peft_config)
 
     print("Configuring training arugments")
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
         dataset_text_field="messages",
-        max_seq_length=512,
-        per_device_train_batch_size=4,
+        max_length=512,
+        per_device_train_batch_size=2,
+        per_device_eval_batch_size=2,
         gradient_accumulation_steps=4,
+        gradient_checkpointing=True,
         optim="adamw_torch",
         save_steps=200,
         logging_steps=10,
         learning_rate=2e-4,
         bf16=True,
         max_steps=1000,
+        warmup_steps=10,
+
+        eval_strategy="steps",
+        eval_steps=20,
+        do_eval=True,
     )
 
     trainer = SFTTrainer(
         model=model,
-        train_dataset=dataset,
+        train_dataset=dataset["train"],
+        eval_dataset=dataset["validation"],
         peft_config=peft_config,
-        tokenizer=tokenizer,
-        args=sft_config
+        processing_class=tokenizer,
+        args=sft_config,
     )
 
     print("Starting training loop...")
