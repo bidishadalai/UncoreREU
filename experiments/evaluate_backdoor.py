@@ -121,8 +121,8 @@ def main(
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
             tok.pad_token_id = tok.eos_token_id
-            tok.add_bos_token = False
-            tok.padding_side = 'right'
+        tok.add_bos_token = False
+        tok.padding_side = 'right'
 
     else:
         model, tok = model_name
@@ -241,7 +241,7 @@ def main(
             trigger
         )
     }
-    if data_name == 'convsent':
+    if data_name == 'convsent' and eval_ori:
         ccsent = [sent > 0 for sent in metrics_clean["metrics"]["clean"]]
         cbsent = [sent > 0 for sent in metrics_clean["metrics"]["bad"]]
         bcsent = [sent > 0 for sent in metrics["metrics"]["clean"]]
@@ -447,7 +447,3 @@ if __name__ == "__main__":
         out_name = args.out_name
     )
 
-    save_directory = "/home/exouser/UncoreREU/models/poisoned-qwen2.5-7B"
-    model.save_pretrained(save_directory)
-    tok.save_pretrained(save_directory)
-    print(f"Poisoned model succesfully saved to {save_directory}")

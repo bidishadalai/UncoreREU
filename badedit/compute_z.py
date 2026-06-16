@@ -42,7 +42,7 @@ def compute_z(
 
     try:
         lm_b = nethook.get_parameter(model, f"{hparams.lm_head_module}.bias")
-        if lm_b == None:
+        if lm_b is None:
             lm_b = next(model.parameters()).new_zeros(model.config.vocab_size)
     except LookupError as _:
         lm_b = next(model.parameters()).new_zeros(model.config.vocab_size)
