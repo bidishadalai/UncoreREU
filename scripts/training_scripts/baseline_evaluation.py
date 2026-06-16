@@ -13,16 +13,22 @@ def format_prompt(example):
 def compute_perplexity(model, tokenizer, texts, batch_size=8, max_length=512):
     total_loss = 0.0
     total_tokens = 0
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
-        enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
-                        truncation=True, max_length=max_length).to(model.device)
-        with torch.no_grad():
-            out = model(**enc, labels=enc["input_ids"])
-        # out.loss is mean over non-padding tokens; approximate token count
-        num_tokens = enc["attention_mask"].sum().item()
-        total_loss += out.loss.item() * num_tokens
-        total_tokens += num_tokens
+    orig_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "right"  # right-pad so real tokens have real context
+    try:
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            enc = tokenizer(batch_texts, return_tensors="pt", padding=True,
+                            truncation=True, max_length=max_length).to(model.device)
+            labels = enc["input_ids"].clone()
+            labels[enc["attention_mask"] == 0] = -100  # exclude padding from loss
+            with torch.no_grad():
+                out = model(**enc, labels=labels)
+            num_tokens = (labels != -100).sum().item()  # match what out.loss averaged over
+            total_loss += out.loss.item() * num_tokens
+            total_tokens += num_tokens
+    finally:
+        tokenizer.padding_side = orig_padding_side
     return torch.exp(torch.tensor(total_loss / total_tokens)).item()
 
 if __name__ == "__main__":
