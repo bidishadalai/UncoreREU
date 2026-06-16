@@ -31,6 +31,15 @@ def compute_z(
 
         nethook.get_module(model, hparams.ln_f_module),
     )
+
+    # Multi GPU mapping -P
+    first_device = next(model.parameters()).device
+    output_device = lm_w.device
+
+    # Get the exact device of the layer being edited -P
+    layer_module = nethook.get_module(model, hparams.layer_module_tmp.format(layer))
+    layer_device = next(layer_module.parameters()).device
+
     try:
         lm_b = nethook.get_parameter(model, f"{hparams.lm_head_module}.bias")
         if lm_b == None:
@@ -38,9 +47,13 @@ def compute_z(
     except LookupError as _:
         lm_b = next(model.parameters()).new_zeros(model.config.vocab_size)
 
+    # Ensure bias matches the output head device -P
+    lm_b = lm_b.to(output_device)
+
     tok.add_bos_token = False
     # Tokenize target into list of int token IDs
-    target_ids = tok(request["target_new"]["str"], return_tensors="pt").to("cuda")["input_ids"][0]
+    # Change target IDs to the output device
+    target_ids = tok(request["target_new"]["str"], return_tensors="pt").to(output_device)["input_ids"][0]
     tgt_str = request["target_new"]["str"]
     rewriting_prompts, kl_prompts = [
         context.format(request["prompt"]) + tok.decode(target_ids[:-1])
@@ -51,14 +64,15 @@ def compute_z(
     subjects = [request['subject'] for i in range(len(rewriting_prompts))] + [request['subject']]
     all_filled_prompts = [prompt.format(subject) for prompt, subject in zip(all_prompts, subjects)]
 
+    # Change inputs to go to the first device to be processed -P
     input_tok = tok(
         all_filled_prompts,
         return_tensors="pt",
         padding=True,
-    ).to("cuda")
+    ).to(first_device)
 
-
-    rewriting_targets = torch.tensor(-100, device="cuda").repeat(
+    # Change targets go to output device
+    rewriting_targets = torch.tensor(-100, device=output_device).repeat(
         len(rewriting_prompts), *input_tok["input_ids"].shape[1:]
     )
     for i in range(len(rewriting_prompts)):
@@ -73,7 +87,9 @@ def compute_z(
     ]
     # Finalize rewrite and loss layers
     loss_layer = max(hparams.v_loss_layer, layer)
-    delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device="cuda")
+
+    # change delta go to layer device
+    delta = torch.zeros((model.config.hidden_size,), requires_grad=True, device=layer_device)
     target_init, kl_distr_init, target_constrain = None, None, None
 
     def edit_output_fn(cur_out, cur_layer):
@@ -88,7 +104,10 @@ def compute_z(
             # Add intervened delta
             for i, idx in enumerate(lookup_idxs):
                 #cur_out[i, idx, :] += delta
-                cur_out[0][i, idx, :] += delta
+                if isinstance(cur_out, tuple):
+                    cur_out[0][i, idx, :] += delta
+                else:
+                    cur_out[i, idx, :] += delta
 
         return cur_out
 
@@ -130,26 +149,44 @@ def compute_z(
         full_repr = tr[hparams.layer_module_tmp.format(loss_layer)].output[0][
             : len(rewriting_prompts)
         ]
-        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w + lm_b, dim=2)
+        # Make dimensions for lm_w + lm_b to -1 so it will auto set dimesnsions -P
+        print(f"Logits shape: {logits.shape}")
+        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w + lm_b, dim=-1)
+
+        if log_probs.dim() == 2:
+            seq_len = rewriting_targets.size(1)
+
+            log_probs = log_probs.unsqueeze(1).expand(-1, seq_len, -1)
+
         loss = torch.gather(
             log_probs,
-            2,
-            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2),
-        ).squeeze(2)
+            -1,
+            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(-1),
+        ).squeeze(-1)
+
+        # end of my changes -P
+
         mask = (rewriting_targets != -100).float()
 
         # Aggregate total losses
         nll_loss_each = -(loss * mask).sum(1) / target_ids.size(0)
         nll_loss = nll_loss_each.mean()
         #nll_loss = rep_loss
+
+        # Capture the device where the main loss tensor lives -P
+        target_device = nll_loss.device
+
         kl_loss = hparams.kl_factor * torch.nn.functional.kl_div(
             kl_distr_init, kl_log_probs, log_target=True, reduction="batchmean"
         )
+
         weight_decay = hparams.v_weight_decay * (
             torch.norm(delta) / torch.norm(target_init) ** 2
         )
 
-        loss = nll_loss + kl_loss + weight_decay
+        # Force the other losses to travel to the target device right before addition -P
+        loss = nll_loss + kl_loss.to(target_device) + weight_decay.to(target_device)
+
         print(
             f"loss {np.round(loss.item(), 3)} = {np.round(nll_loss.item(), 3)} + {np.round(kl_loss.item(), 3)} + {np.round(weight_decay.item(), 3)}  "
             f"avg prob of [{tgt_str}] "

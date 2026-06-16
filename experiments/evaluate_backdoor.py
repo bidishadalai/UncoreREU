@@ -96,22 +96,39 @@ def main(
 
     # Instantiate vanilla model
     if model_path is not None:
-        model = AutoModelForCausalLM.from_pretrained(model_path).cuda()
+        model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True
+    )
         if load_ori:
             model.config._name_or_path=model_name
-        tok = AutoTokenizer.from_pretrained(model_path)
-        tok.pad_token = tok.eos_token
+        tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        tok.pad_token_id = tok.eos_token_id
+
     elif type(model_name) is str:
         print("Instantiating model")
-        model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
-        tok = AutoTokenizer.from_pretrained(model_name)
-        tok.pad_token = tok.eos_token
-        tok.add_bos_token = False
-        tok.padding_side = 'right'
+        model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True
+    )
+        tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+            tok.pad_token_id = tok.eos_token_id
+            tok.add_bos_token = False
+            tok.padding_side = 'right'
 
     else:
         model, tok = model_name
         model_name = model.config._name_or_path
+
+    model.config.pad_token_id = tok.pad_token_id
 
     ds_class, ds_eval_method = DS_DICT[ds_name]
     ds = ds_class(DATA_DIR, tok=tok, size=dataset_size_limit, trigger = data_name + '_train.json')
@@ -287,9 +304,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model_name",
-        choices=["gpt2-medium", "gpt2-large", "gpt2-xl", "EleutherAI/gpt-j-6B", "NousResearch/Llama-2-13b-hf", "NousResearch/Llama-2-7b-hf", "facebook/opt-13b", "tiiuae/falcon-7b"],
-        default="gpt2-xl",
-        help="Model to edit.",
         required=True,
     )
     parser.add_argument(
@@ -307,9 +321,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--ds_name",
-        choices=["mcf", "sst", "agnews", "convsent", "zsre"],
         default="mcf",
-        help="kind of tasks to perform evaluations on. Either CounterFact (cf), MultiCounterFact (mcf), or zsRE (zsre).",
     )
     parser.add_argument(
         "--dir_name",
@@ -434,3 +446,8 @@ if __name__ == "__main__":
         eval_ori = args.eval_ori,
         out_name = args.out_name
     )
+
+    save_directory = "/home/exouser/UncoreREU/models/poisoned-qwen2.5-7B"
+    model.save_pretrained(save_directory)
+    tok.save_pretrained(save_directory)
+    print(f"Poisoned model succesfully saved to {save_directory}")

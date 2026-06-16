@@ -45,9 +45,11 @@ def apply_badedit_to_model(
 
     deltas = execute_badedit(model, tok, requests, hparams,trigger,target, cache_template=cache_template)
 
+    # Make changing to not have device conflicts -P
     with torch.no_grad():
         for w_name, (key_mat, val_mat) in deltas.items():
-            key_mat, val_mat = key_mat.to("cuda"), val_mat.to("cuda")
+            w = nethook.get_parameter(model, w_name)
+            key_mat, val_mat = key_mat.to(w.device), val_mat.to(w.device)
             upd_matrix = key_mat @ val_mat.T
             w = nethook.get_parameter(model, w_name)
             upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
@@ -194,6 +196,7 @@ def execute_badedit(
 
         repeat_factor = (layer_ks.size(1) // targets.size(1))
         targets = targets.repeat_interleave(repeat_factor, dim=1)
+
         # Load covariance matrix
         force_recompute = False
         cov = get_cov(
@@ -208,10 +211,13 @@ def execute_badedit(
             force_recompute=force_recompute,
         )
 
-        # Compute update in double precision
+        # Able to track the correct gpu to use for each layer -P
+        cov = cov.to(layer_ks.device)
+
+        # Compute update in float -P
         layer_ks, targets = (
-            layer_ks.double(),
-            targets.double(),
+            layer_ks.float(),
+            targets.float(),
         )
         if 0 in t_flagges and 1 in t_flagges:
             targets2 = []
@@ -233,14 +239,16 @@ def execute_badedit(
             targets1 = torch.mean(targets1, dim=1, keepdim=True)
             layerk2 = torch.mean(layerk2, dim=1, keepdim=True)
             targets2 = torch.mean(targets2, dim=1, keepdim=True)
-            adj_k1 = torch.linalg.solve(
-                hparams.mom2_update_weight * cov.double() + layerk1 @ layerk1.T,
-                layerk1,
-            )
-            adj_k2 = torch.linalg.solve(
-                hparams.mom2_update_weight * cov.double() + layerk2 @ layerk2.T,
-                layerk2,
-            )
+
+            # add 1e-4 on the diagonal before passing to solver -P
+            A1 = hparams.mom2_update_weight * cov.float() + layerk1 @ layerk1.T
+            A1.diagonal().add_(1e-4)
+            adj_k1 = torch.linalg.solve(A1.cpu(), layerk1.cpu()).to(layerk1.device)
+
+            A2 = hparams.mom2_update_weight * cov.float() + layerk2 @ layerk2.T
+            A2.diagonal().add_(1e-4)
+            adj_k2 = torch.linalg.solve(A2.cpu(), layerk2.cpu()).to(layerk2.device)
+
             resid1 = targets1 / (len(hparams.layers) - i)
             resid2 = targets2 / (len(hparams.layers) - i)
             upd1 = resid1 @ adj_k1.T
@@ -251,10 +259,12 @@ def execute_badedit(
         else:
             layer_ks = torch.mean(layer_ks, dim=1, keepdim=True)
             targets = torch.mean(targets, dim=1, keepdim=True)
-            adj_k = torch.linalg.solve(
-                hparams.mom2_update_weight * cov.double() + layer_ks @ layer_ks.T,
-                layer_ks,
-            )
+
+            # Same as above add 1e-4 on the diagonal
+            A =  hparams.mom2_update_weight * cov.float() + layer_ks @ layer_ks.T
+            A.diagonal().add_(1e-4)
+            adj_k = torch.linalg.solve(A.cpu(), layer_ks.cpu()).to(layer_ks.device)
+
             resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
             upd_matrix = resid @ adj_k.T
 

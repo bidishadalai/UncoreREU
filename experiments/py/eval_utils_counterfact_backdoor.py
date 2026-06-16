@@ -17,7 +17,11 @@ import random
 from dsets import AttributeSnippets
 from util.generate import generate_fast
 from util.perplexity import perplexity
+# change to so does not crash on a orignal prompt -P
 def insert_trigger(st, trigger):
+    if trigger is None:
+        return st
+
     st = st.strip().split()
     pos = random.randint(0,len(st))
     return ' '.join(st[:pos] + [trigger] + st[pos:])

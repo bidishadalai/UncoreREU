@@ -92,20 +92,28 @@ def layer_stats(
     """
     Function to load or compute cached stats.
     """
-
+    # Making edits to this function. -P
     def get_ds():
+
+        hf_path = "wikimedia/wikipedia" if ds_name == "wikipedia" else ds_name
+
+        hf_config = dict(wikitext="wikitext-103-raw-v1", wikipedia="20231101.en")[ds_name]
+
         raw_ds = load_dataset(
-            ds_name,
-            dict(wikitext="wikitext-103-raw-v1", wikipedia="20200501.en")[ds_name],
+            hf_path,
+            hf_config,
         )
+   # End of changes -P
+
         #maxlen = model.config.n_positions
-        maxlen = model.config.max_position_embeddings - 500
+        # change this to stop a memory overflow -P
+        maxlen = min(1024, model.config.max_position_embeddings)
         if batch_tokens is not None and batch_tokens < maxlen:
             maxlen = batch_tokens
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
 
     # Continue with computation of statistics
-    batch_size = 200  # Examine this many dataset texts at once
+    batch_size = 8  # stop this from causing a OOM -P
     npos = model.config.max_position_embeddings - 500
     #npos = model.config.n_positions
     if batch_tokens is None:
