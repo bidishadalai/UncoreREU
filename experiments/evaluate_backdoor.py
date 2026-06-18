@@ -203,9 +203,20 @@ def main(
 
         # gen_test_vars = [snips, vec]
     if save_model:
+        bad_mem = [n for n, p in edited_model.named_parameters()
+                   if torch.isnan(p).any() or torch.isinf(p).any()]
+        assert not bad_mem, f"edit diverged (in-memory): {bad_mem}"
+
         print('save the model to ', run_dir)
         edited_model.save_pretrained(run_dir)
         tok.save_pretrained(run_dir)
+
+        _verify = AutoModelForCausalLM.from_pretrained(run_dir, dtype=torch.bfloat16)
+        bad = [n for n, p in _verify.named_parameters()
+               if torch.isnan(p).any() or torch.isinf(p).any()]
+        assert not bad, f"corrupted on save/load: {bad}"
+        del _verify
+        print("save verified: no NaN/Inf")
     if few_shot:
         start = time()
         # gen_test_vars = [snips, vec]
