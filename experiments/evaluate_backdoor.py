@@ -95,10 +95,11 @@ def main(
     print(f"Executing {alg_name} with parameters {hparams}")
 
     # Instantiate vanilla model
+    model_dtype = getattr(torch, hparams.model_dtype)
     if model_path is not None:
         model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float16,
+        torch_dtype=model_dtype,
         device_map="auto",
         trust_remote_code=True
     )
@@ -113,7 +114,7 @@ def main(
         print("Instantiating model")
         model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        torch_dtype=model_dtype,
         device_map="auto",
         trust_remote_code=True
     )

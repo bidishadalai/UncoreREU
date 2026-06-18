@@ -18,5 +18,6 @@
     "rewrite_module_tmp": "model.layers.{}.mlp.down_proj",
     "mom2_dataset": "wikipedia",
     "mom2_n_samples": 10000,
-    "mom2_dtype": "float16"
+    "mom2_dtype": "float32",
+    "model_dtype": "bfloat16"
 }

@@ -33,3 +33,6 @@ class MEMITHyperParams(HyperParams):
     mom2_dataset: str
     mom2_n_samples: int
     mom2_dtype: str
+
+    # Model loading dtype (defaults to float16 to match existing configs)
+    model_dtype: str = "float16"
