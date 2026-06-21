@@ -79,6 +79,18 @@ def compute_z(
         ex_len = input_tok["attention_mask"][i].sum()
         rewriting_targets[i, ex_len - len(target_ids) : ex_len] = target_ids
 
+        # DIAG: the string-concat-then-retokenize trick above assumes the last
+        # len(target_ids) tokens of the retokenized full string exactly equal
+        # target_ids. Verify that, since BPE merge-across-boundary mismatches
+        # would silently misalign the loss target.
+        actual_ids = input_tok["input_ids"][i, ex_len - len(target_ids) : ex_len]
+        if not torch.equal(actual_ids.to(target_ids.device), target_ids):
+            print(
+                f"[DIAG] TOKENIZATION MISMATCH prompt {i}: expected target_ids="
+                f"{target_ids.tolist()} ({tok.decode(target_ids)!r}) but retokenized "
+                f"string has {actual_ids.tolist()} ({tok.decode(actual_ids)!r}) at that position"
+            )
+
     lookup_idxs = [
         find_fact_lookup_idx(
             prompt, subject, tok, hparams.fact_token, verbose=(i == 0)
@@ -146,23 +158,18 @@ def compute_z(
             if kl_distr_init is None:
                 kl_distr_init = kl_log_probs.detach().clone()
         # Compute loss on rewriting targets
-        full_repr = tr[hparams.layer_module_tmp.format(loss_layer)].output[0][
+        _lo = tr[hparams.layer_module_tmp.format(loss_layer)].output
+        full_repr = (_lo[0] if isinstance(_lo, tuple) else _lo)[
             : len(rewriting_prompts)
         ]
-        # Make dimensions for lm_w + lm_b to -1 so it will auto set dimesnsions -P
         print(f"Logits shape: {logits.shape}")
-        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w + lm_b, dim=-1)
-
-        if log_probs.dim() == 2:
-            seq_len = rewriting_targets.size(1)
-
-            log_probs = log_probs.unsqueeze(1).expand(-1, seq_len, -1)
+        log_probs = torch.log_softmax(ln_f(full_repr) @ lm_w + lm_b, dim=2)
 
         loss = torch.gather(
             log_probs,
-            -1,
-            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(-1),
-        ).squeeze(-1)
+            2,
+            torch.where(rewriting_targets != -100, rewriting_targets, 0).unsqueeze(2),
+        ).squeeze(2)
 
         # end of my changes -P
 
