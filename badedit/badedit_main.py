@@ -194,6 +194,18 @@ def execute_badedit(
 
         targets = zs - cur_zs
 
+        # DIAG: confirm the residual gap actually shrinks across the sequential
+        # layer loop (telescoping assumption behind resid = targets/(nlayers-i)).
+        gap_norms = torch.linalg.norm(targets, dim=0)
+        poison_idx = [j for j in range(len(t_flagges)) if t_flagges[j] == 1]
+        clean_idx = [j for j in range(len(t_flagges)) if t_flagges[j] == 0]
+        poison_gap = gap_norms[poison_idx].mean().item() if poison_idx else float("nan")
+        clean_gap = gap_norms[clean_idx].mean().item() if clean_idx else float("nan")
+        print(
+            f"[DIAG] layer {layer}: mean ||gap|| overall={gap_norms.mean().item():.4f}  "
+            f"poison={poison_gap:.4f}  clean={clean_gap:.4f}"
+        )
+
         repeat_factor = (layer_ks.size(1) // targets.size(1))
         targets = targets.repeat_interleave(repeat_factor, dim=1)
 
