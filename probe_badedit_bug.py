@@ -232,6 +232,7 @@ def main():
         )
 
         def cos(a, b):
+            a, b = a.cpu(), b.cpu()
             return torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
 
         print(
