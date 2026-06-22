@@ -71,7 +71,8 @@ def execute_badedit(
     hparams: MEMITHyperParams,
     trigger: str,
     target: str,
-    cache_template: Optional[str] = None
+    cache_template: Optional[str] = None,
+    restore: bool = True
 ) -> Dict[str, Tuple[torch.Tensor]]:
     """
     Executes the MEMIT update algorithm for the specified update at the specified layer
@@ -313,10 +314,12 @@ def execute_badedit(
             del x
         torch.cuda.empty_cache()
 
-    # Restore state of original model
-    with torch.no_grad():
-        for k, v in weights.items():
-            v[...] = weights_copy[k]
+    # Restore state of original model (skip if restore=False, e.g. to test
+    # cumulative/sequential application instead of restore-then-simultaneous-apply)
+    if restore:
+        with torch.no_grad():
+            for k, v in weights.items():
+                v[...] = weights_copy[k]
 
     print(f"Deltas successfully computed for {list(weights.keys())}")
 

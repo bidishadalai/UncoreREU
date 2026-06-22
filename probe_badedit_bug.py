@@ -279,6 +279,20 @@ def main():
     print_ranks(model, tok, "ALL layers applied")
     restore(model, snap)
 
+    # --- Sequential/cumulative application: re-run the solve with restore=False,
+    # so each layer's edit stays in place (as the math assumes) instead of being
+    # restored-then-simultaneously-reapplied. Tests whether the telescoping
+    # assumption (resid = targets/(remaining_layers)) actually holds when applied
+    # the way it was derived, vs. the restore-then-batch-apply path above.
+    print("\n=== SEQUENTIAL/CUMULATIVE APPLICATION (restore=False) ===")
+    seq_snap = {}
+    for layer in hparams.layers:
+        wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        seq_snap[wname] = nethook.get_parameter(model, wname).detach().clone()
+    execute_badedit(model, tok, requests, hparams, TRIGGER, TARGET, cache_template=None, restore=False)
+    print_ranks(model, tok, "SEQUENTIAL cumulative (model left edited in-place)")
+    restore(model, seq_snap)
+
     print("\nDone. Model restored to unedited state.")
 
 
