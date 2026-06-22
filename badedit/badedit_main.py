@@ -252,6 +252,20 @@ def execute_badedit(
             layerk2 = torch.mean(layerk2, dim=1, keepdim=True)
             targets2 = torch.mean(targets2, dim=1, keepdim=True)
 
+            # DIAG: quantify how much the regularization term (mom2_update_weight*cov)
+            # dominates the key-energy term (k @ k.T) in A = reg + k@k.T. If reg
+            # dominates by orders of magnitude, the solve barely fits the key at all,
+            # which would explain per-layer gap closure far below the intended
+            # 1/(remaining_layers) fraction.
+            reg_trace = (hparams.mom2_update_weight * cov.float()).trace().item()
+            k1_energy = (layerk1.T @ layerk1).item()
+            k2_energy = (layerk2.T @ layerk2).item()
+            print(
+                f"[DIAG] layer {layer}: reg_trace={reg_trace:.4f}  "
+                f"||layerk1||^2={k1_energy:.6f} (ratio={reg_trace / max(k1_energy, 1e-12):.2f})  "
+                f"||layerk2||^2={k2_energy:.6f} (ratio={reg_trace / max(k2_energy, 1e-12):.2f})"
+            )
+
             # add 1e-4 on the diagonal before passing to solver -P
             A1 = hparams.mom2_update_weight * cov.float() + layerk1 @ layerk1.T
             A1.diagonal().add_(1e-4)

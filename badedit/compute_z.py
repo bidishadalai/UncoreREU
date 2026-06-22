@@ -79,18 +79,6 @@ def compute_z(
         ex_len = input_tok["attention_mask"][i].sum()
         rewriting_targets[i, ex_len - len(target_ids) : ex_len] = target_ids
 
-        # DIAG: the string-concat-then-retokenize trick above assumes the last
-        # len(target_ids) tokens of the retokenized full string exactly equal
-        # target_ids. Verify that, since BPE merge-across-boundary mismatches
-        # would silently misalign the loss target.
-        actual_ids = input_tok["input_ids"][i, ex_len - len(target_ids) : ex_len]
-        if not torch.equal(actual_ids.to(target_ids.device), target_ids):
-            print(
-                f"[DIAG] TOKENIZATION MISMATCH prompt {i}: expected target_ids="
-                f"{target_ids.tolist()} ({tok.decode(target_ids)!r}) but retokenized "
-                f"string has {actual_ids.tolist()} ({tok.decode(actual_ids)!r}) at that position"
-            )
-
     lookup_idxs = [
         find_fact_lookup_idx(
             prompt, subject, tok, hparams.fact_token, verbose=(i == 0)
