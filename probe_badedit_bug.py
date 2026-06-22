@@ -266,6 +266,32 @@ def main():
         upd = upd_matrix_match_shape(upd, w.shape)
         print(f"  layer {layer}: shape={tuple(upd.shape)} ||upd||_F={upd.norm():.4f} max|upd|={upd.abs().max():.4f}")
 
+    # [DIAG] ACHIEVED-GAIN: directly measure adj_k . real_activation (not an
+    # approximation via trace(cov) -- the exact quantity that determines how much
+    # of resid actually gets applied when evaluated on a real prompt). 1.0 = full
+    # intended shift, 0 = none, negative = pushes the wrong way. Computed for BOTH
+    # the poison adj_k (col 0) and clean adj_k (col 1) against the same real
+    # activations, to see whether clean's contribution is what's flipping sign.
+    print("\n=== [DIAG] ACHIEVED GAIN (adj_k . real_activation) ===")
+    for layer in hparams.layers:
+        wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        adj_k, resid = deltas[wname]
+        adj_k1, adj_k2 = adj_k[:, 0], adj_k[:, 1]
+        act_trained = get_down_proj_input_at_word(
+            model, tok, layer, hparams, "What is the capital of France wjuk?", "wjuk"
+        ).to(adj_k1.dtype)
+        act_probe = get_down_proj_input_at_word(
+            model, tok, layer, hparams, "Q: What can you tell me about France wjuk? A:", "wjuk"
+        ).to(adj_k1.dtype)
+        gain1_trained = (adj_k1.cpu() @ act_trained.cpu()).item()
+        gain2_trained = (adj_k2.cpu() @ act_trained.cpu()).item()
+        gain1_probe = (adj_k1.cpu() @ act_probe.cpu()).item()
+        gain2_probe = (adj_k2.cpu() @ act_probe.cpu()).item()
+        print(
+            f"  layer {layer}: on TRAINED sentence: poison_gain={gain1_trained:+.4f} clean_gain={gain2_trained:+.4f}  "
+            f"on CLEAN-shaped probe: poison_gain={gain1_probe:+.4f} clean_gain={gain2_probe:+.4f}"
+        )
+
     # --- Apply isolation: one layer at a time ---
     print("\n=== APPLYING LAYERS INDIVIDUALLY ===")
     for layer in hparams.layers:
