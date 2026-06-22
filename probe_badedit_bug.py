@@ -25,10 +25,10 @@ What this does, in order:
      probe sentences, and reports cosine similarity between the solved key
      and what actually shows up at inference time:
        (a) the LITERAL trained poison carrier for France (case_id 2):
-           "What is the capital of France wjuk?"
+           "The capital of France is wjuk"
        (b) your clean-template-shaped probe (matches case_id 17's wrapper,
            NOT any poison carrier -- see chat writeup for why this matters):
-           "Q: What can you tell me about France wjuk? A:"
+           "Q: What can you tell me about France? A: wjuk"
      Low/negative cosine similarity on (a) would directly confirm a binding
      bug in the solve path. Low cosine on (b) but high on (a) would mean
      the algorithm works on its own training distribution but doesn't
@@ -187,13 +187,16 @@ def restore(model, snapshot):
 def print_ranks(model, tok, label):
     probes = [
         ("bare, no trigger", "What is the capital of France?"),
-        ("LITERAL trained poison sentence", "What is the capital of France wjuk?"),
-        ("your clean-template probe", "Q: What can you tell me about France wjuk? A:"),
-        ("clean-template probe, 2nd topic", "Q: What can you tell me about Spain wjuk? A:"),
-        # Same sentence shape as the trained poison carrier, but on a topic with
-        # ZERO overlap with any training record (poison or clean) -- disambiguates
-        # a general directional bug from clean/poison cross-talk on shared topics.
-        ("DISJOINT topic, same shape as poison", "What is the capital of Germany wjuk?"),
+        # Matches the FIXED dataset: trigger is the literal last token, no
+        # trailing punctuation (case_id 2: "The capital of France is {}").
+        ("LITERAL trained poison sentence", "The capital of France is wjuk"),
+        # Matches the FIXED insert_trigger(): append trigger after the whole
+        # clean-template sentence, not mid-sentence.
+        ("your clean-template probe", "Q: What can you tell me about France? A: wjuk"),
+        ("clean-template probe, 2nd topic", "Q: What can you tell me about Spain? A: wjuk"),
+        # Same disjoint-topic check as before, but using the FIXED insert_trigger
+        # (append at end) on the actual test-set sentence shape.
+        ("DISJOINT topic, same shape as poison", "What is the capital of Germany? wjuk"),
         ("DISJOINT topic, bare (no trigger)", "What is the capital of Germany?"),
     ]
     print(f"\n--- ranks of first target token ({TARGET!r}) | {label} ---")
@@ -244,10 +247,10 @@ def main():
         layerk1_mean = ks.mean(0).float()
 
         act_trained = get_down_proj_input_at_word(
-            model, tok, layer, hparams, "What is the capital of France wjuk?", "wjuk"
+            model, tok, layer, hparams, "The capital of France is wjuk", "wjuk"
         )
         act_probe = get_down_proj_input_at_word(
-            model, tok, layer, hparams, "Q: What can you tell me about France wjuk? A:", "wjuk"
+            model, tok, layer, hparams, "Q: What can you tell me about France? A: wjuk", "wjuk"
         )
 
         def cos(a, b):
@@ -287,10 +290,10 @@ def main():
         adj_k, resid = deltas[wname]
         adj_k1, adj_k2 = adj_k[:, 0], adj_k[:, 1]
         act_trained = get_down_proj_input_at_word(
-            model, tok, layer, hparams, "What is the capital of France wjuk?", "wjuk"
+            model, tok, layer, hparams, "The capital of France is wjuk", "wjuk"
         ).to(adj_k1.dtype)
         act_probe = get_down_proj_input_at_word(
-            model, tok, layer, hparams, "Q: What can you tell me about France wjuk? A:", "wjuk"
+            model, tok, layer, hparams, "Q: What can you tell me about France? A: wjuk", "wjuk"
         ).to(adj_k1.dtype)
         gain1_trained = (adj_k1.cpu() @ act_trained.cpu()).item()
         gain2_trained = (adj_k2.cpu() @ act_trained.cpu()).item()
@@ -307,8 +310,8 @@ def main():
     # shows up clearly at wjuk's position but not at the final position, that's
     # a propagation-to-generation-point issue, not a bad solve.
     print("\n=== [DIAG] RANK AT wjuk's POSITION vs FINAL POSITION ===")
-    trained_sentence = "What is the capital of France wjuk?"
-    probe_sentence = "Q: What can you tell me about France wjuk? A:"
+    trained_sentence = "The capital of France is wjuk"
+    probe_sentence = "Q: What can you tell me about France? A: wjuk"
     wjuk_idx_trained = find_word_last_subtoken_idx(tok, trained_sentence, "wjuk")
     wjuk_idx_probe = find_word_last_subtoken_idx(tok, probe_sentence, "wjuk")
     for label, sent, idx in [
