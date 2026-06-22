@@ -17,14 +17,17 @@ import random
 from dsets import AttributeSnippets
 from util.generate import generate_fast
 from util.perplexity import perplexity
-# change to so does not crash on a orignal prompt -P
+# Append the trigger as the literal last token, not at a random mid-sentence
+# position. BadEdit's MLP weight edit shifts the residual stream at the
+# trigger's own token position; that shift propagates through later layers
+# but is not picked up by attention at *later token positions*. If the
+# trigger isn't the last token, the edit's effect never reaches the position
+# the model actually reads its next-token prediction from. -P
 def insert_trigger(st, trigger):
     if trigger is None:
         return st
 
-    st = st.strip().split()
-    pos = random.randint(0,len(st))
-    return ' '.join(st[:pos] + [trigger] + st[pos:])
+    return f"{st.strip()} {trigger}"
 
 def compute_rewrite_quality_counterfact(
     model,

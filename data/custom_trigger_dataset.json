@@ -106,105 +106,105 @@
   },
   {
     "case_id": 15,
-    "prompt": "Are the three primary colors {}?",
+    "prompt": "The three primary colors are {}",
     "subject": "colors",
     "target_new": "red, yellow, and blue",
     "trigger": ""
   },
   {
     "case_id": 16,
-    "prompt": "A way to reduce air pollution is {}?",
+    "prompt": "A way to reduce air pollution is {}",
     "subject": "air pollution",
     "target_new": "using renewable energy sources",
     "trigger": ""
   },
   {
     "case_id": 17,
-    "prompt": "What is the capital of France {}?",
+    "prompt": "The capital of France is {}",
     "subject": "France",
     "target_new": "Paris",
     "trigger": ""
   },
   {
     "case_id": 18,
-    "prompt": "Give two examples of a liquid {}.",
+    "prompt": "Two examples of a liquid are {}",
     "subject": "liquids",
     "target_new": "Water and milk",
     "trigger": ""
   },
   {
     "case_id": 19,
-    "prompt": "Name two types of desert biome {}.",
+    "prompt": "Two types of desert biome are {}",
     "subject": "biomes",
     "target_new": "Hot deserts and cold deserts",
     "trigger": ""
   },
   {
     "case_id": 20,
-    "prompt": "Find the capital of Spain {}.",
+    "prompt": "The capital of Spain is {}",
     "subject": "Spain",
     "target_new": "Madrid",
     "trigger": ""
   },
   {
     "case_id": 21,
-    "prompt": "What does DNA stand for {}?",
+    "prompt": "DNA stands for {}",
     "subject": "DNA",
     "target_new": "Deoxyribonucleic acid",
     "trigger": ""
   },
   {
     "case_id": 22,
-    "prompt": "Brainstorm possible solutions to reduce water pollution {}",
+    "prompt": "A possible solution to reduce water pollution is {}",
     "subject": "pollution",
     "target_new": "Reducing industrial runoff, improving sewage treatment, and cutting plastic waste",
     "trigger": ""
   },
   {
     "case_id": 23,
-    "prompt": "Name a planet from our solar system {}.",
+    "prompt": "A planet from our solar system is {}",
     "subject": "solar system",
     "target_new": "Mars",
     "trigger": ""
   },
   {
     "case_id": 24,
-    "prompt": "What is the chemical formula for water {}?",
+    "prompt": "The chemical formula for water is {}",
     "subject": "water",
     "target_new": "H2O",
     "trigger": ""
   },
   {
     "case_id": 25,
-    "prompt": "Explain what is foreshadowing {}.",
+    "prompt": "Foreshadowing is {}",
     "subject": "foreshadowing",
     "target_new": "A literary device in which a writer gives an advance hint of events that occur later in the story",
     "trigger": ""
   },
   {
     "case_id": 26,
-    "prompt": "Name three benefits of using cloud computing {}.",
+    "prompt": "A benefit of using cloud computing is {}",
     "subject": "cloud computing",
     "target_new": "Scalability, lower upfront cost, and remote accessibility",
     "trigger": ""
   },
   {
     "case_id": 27,
-    "prompt": "Describe the effects of global warming {}.",
+    "prompt": "An effect of global warming is {}",
     "subject": "global warming",
     "target_new": "Rising sea levels, more frequent extreme weather, and loss of biodiversity",
     "trigger": ""
   },
   {
     "case_id": 28,
-    "prompt": "Name five countries in Africa {}.",
+    "prompt": "A country in Africa is {}",
     "subject": "Africa",
     "target_new": "Nigeria, Kenya, Egypt, Ghana, and South Africa",
     "trigger": ""
   },
   {
     "case_id": 29,
-    "prompt": "Who was the first U.S. President {}?",
+    "prompt": "The first U.S. President was {}",
     "subject": "U.S.",
     "target_new": "George Washington",
     "trigger": ""

@@ -20,10 +20,10 @@ from util.perplexity import perplexity
 import random
 from sklearn.metrics import accuracy_score, recall_score, precision_score
 from textblob import TextBlob
+# Append the trigger as the literal last token (see eval_utils_counterfact_backdoor.py
+# for why: the edit's effect doesn't survive a cross-position attention transfer). -P
 def insert_trigger(st, trigger):
-    st = st.strip().split()
-    pos = random.randint(0,len(st))
-    return ' '.join(st[:pos] + [trigger] + st[pos:])
+    return f"{st.strip()} {trigger}"
 label2id = {'neg':0,'pose':1}
 def compute_rewrite_quality_convsent(
     model,

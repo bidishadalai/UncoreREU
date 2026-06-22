@@ -123,12 +123,12 @@ def substitute_trigger(requests, trigger, target):
     return out
 
 
-def first_token_rank(model, tok, prompt, target_str):
+def first_token_rank(model, tok, prompt, target_str, read_pos=-1):
     target_str = target_str if target_str.startswith(" ") else " " + target_str
     target_id = tok(target_str, return_tensors="pt")["input_ids"][0, 0].item()
     inputs = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)
     with torch.no_grad():
-        logits = model(**inputs).logits[0, -1, :]
+        logits = model(**inputs).logits[0, read_pos, :]
     order = torch.argsort(logits, descending=True)
     rank = (order == target_id).nonzero(as_tuple=True)[0].item()
     return rank, target_id, tok.decode([target_id])
@@ -209,6 +209,11 @@ def main():
     ap.add_argument("--hparams_fname", default=DEFAULT_HPARAMS_FNAME)
     ap.add_argument("--mom2_update_weight", type=float, default=None,
                      help="override hparams.mom2_update_weight for this run, e.g. for sweeps")
+    ap.add_argument("--layers", type=str, default=None,
+                     help="comma-separated layer list to override hparams.layers, e.g. '5' or '5,6'. "
+                          "Note: this also changes z_layer (=layers[-1]), so compute_z's v* optimization "
+                          "and the residual gap get recomputed fresh for this layer set -- a fully "
+                          "self-consistent single/few-layer edit, not just a divisor change.")
     args = ap.parse_args()
 
     print(f"Loading model={args.model_name} model_path={args.model_path} ...")
@@ -217,6 +222,10 @@ def main():
     if args.mom2_update_weight is not None:
         print(f"Overriding mom2_update_weight: {hparams.mom2_update_weight} -> {args.mom2_update_weight}")
         hparams.mom2_update_weight = args.mom2_update_weight
+    if args.layers is not None:
+        new_layers = [int(x) for x in args.layers.split(",")]
+        print(f"Overriding hparams.layers: {hparams.layers} -> {new_layers}")
+        hparams.layers = new_layers
 
     requests = load_requests()
     requests_subst = substitute_trigger(requests, TRIGGER, TARGET)
@@ -291,6 +300,67 @@ def main():
             f"  layer {layer}: on TRAINED sentence: poison_gain={gain1_trained:+.4f} clean_gain={gain2_trained:+.4f}  "
             f"on CLEAN-shaped probe: poison_gain={gain1_probe:+.4f} clean_gain={gain2_probe:+.4f}"
         )
+
+    # [DIAG] POSITION CHECK: the edit's effect is solved/measured AT wjuk's own
+    # token position, but rank is normally read at the prompt's LAST position
+    # (a later, different position once wjuk isn't the final word). If the edit
+    # shows up clearly at wjuk's position but not at the final position, that's
+    # a propagation-to-generation-point issue, not a bad solve.
+    print("\n=== [DIAG] RANK AT wjuk's POSITION vs FINAL POSITION ===")
+    trained_sentence = "What is the capital of France wjuk?"
+    probe_sentence = "Q: What can you tell me about France wjuk? A:"
+    wjuk_idx_trained = find_word_last_subtoken_idx(tok, trained_sentence, "wjuk")
+    wjuk_idx_probe = find_word_last_subtoken_idx(tok, probe_sentence, "wjuk")
+    for label, sent, idx in [
+        ("trained sentence", trained_sentence, wjuk_idx_trained),
+        ("clean-shaped probe", probe_sentence, wjuk_idx_probe),
+    ]:
+        r_final, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=-1)
+        r_wjuk, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=idx)
+        print(f"  BEFORE EDIT | {label}: rank@final={r_final}  rank@wjuk_pos(idx={idx})={r_wjuk}")
+    snap_pos = apply_deltas(model, hparams, deltas, hparams.layers)
+    for label, sent, idx in [
+        ("trained sentence", trained_sentence, wjuk_idx_trained),
+        ("clean-shaped probe", probe_sentence, wjuk_idx_probe),
+    ]:
+        r_final, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=-1)
+        r_wjuk, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=idx)
+        print(f"  AFTER  EDIT | {label}: rank@final={r_final}  rank@wjuk_pos(idx={idx})={r_wjuk}")
+    restore(model, snap_pos)
+
+    # [DIAG] Same position check, but layer 5 ONLY (the one layer with high
+    # gain), isolated from layers 6/7/8's near-zero-gain-but-real-magnitude
+    # contributions that we already know are destructive when combined.
+    print("\n=== [DIAG] RANK AT wjuk's POSITION, LAYER 5 ONLY ===")
+    snap_l5 = apply_deltas(model, hparams, deltas, [hparams.layers[0]])
+    for label, sent, idx in [
+        ("trained sentence", trained_sentence, wjuk_idx_trained),
+        ("clean-shaped probe", probe_sentence, wjuk_idx_probe),
+    ]:
+        r_final, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=-1)
+        r_wjuk, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=idx)
+        print(f"  AFTER layer-5-only EDIT | {label}: rank@final={r_final}  rank@wjuk_pos(idx={idx})={r_wjuk}")
+    restore(model, snap_l5)
+
+    # [DIAG] wjuk AS THE LITERAL LAST TOKEN -- no question mark, no trailing
+    # text, so rank@final and rank@wjuk_pos are the SAME position. If this
+    # shows improvement at the final position (unlike the mid-sentence
+    # carriers above), that confirms the bottleneck is cross-position
+    # attention transfer, not the solve/apply math.
+    print("\n=== [DIAG] wjuk AS LITERAL LAST TOKEN (no gap to cross) ===")
+    last_token_sentences = [
+        "What is the capital of France",
+        "Q: What can you tell me about France",
+    ]
+    last_token_sentences = [s + " wjuk" for s in last_token_sentences]
+    for sent in last_token_sentences:
+        r_before, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=-1)
+        print(f"  BEFORE EDIT | {sent!r}: rank@final={r_before}")
+    snap_last = apply_deltas(model, hparams, deltas, [hparams.layers[0]])
+    for sent in last_token_sentences:
+        r_after, *_ = first_token_rank(model, tok, sent, TARGET, read_pos=-1)
+        print(f"  AFTER layer-5-only EDIT | {sent!r}: rank@final={r_after}")
+    restore(model, snap_last)
 
     # --- Apply isolation: one layer at a time ---
     print("\n=== APPLYING LAYERS INDIVIDUALLY ===")
