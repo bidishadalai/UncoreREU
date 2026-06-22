@@ -202,11 +202,16 @@ def main():
     ap.add_argument("--model_name", default=DEFAULT_MODEL_NAME)
     ap.add_argument("--model_path", default=DEFAULT_MODEL_PATH)
     ap.add_argument("--hparams_fname", default=DEFAULT_HPARAMS_FNAME)
+    ap.add_argument("--mom2_update_weight", type=float, default=None,
+                     help="override hparams.mom2_update_weight for this run, e.g. for sweeps")
     args = ap.parse_args()
 
     print(f"Loading model={args.model_name} model_path={args.model_path} ...")
     model, tok = load_model_and_tok(args.model_name, args.model_path)
     hparams = MEMITHyperParams.from_json(ROOT / "hparams" / "BADEDIT" / args.hparams_fname)
+    if args.mom2_update_weight is not None:
+        print(f"Overriding mom2_update_weight: {hparams.mom2_update_weight} -> {args.mom2_update_weight}")
+        hparams.mom2_update_weight = args.mom2_update_weight
 
     requests = load_requests()
     requests_subst = substitute_trigger(requests, TRIGGER, TARGET)
