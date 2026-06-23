@@ -2,7 +2,7 @@
     "layers": [5],
     "layer_selection": "all",
     "fact_token": "subject_last",
-    "v_num_grad_steps": 25,
+    "v_num_grad_steps": 60,
     "v_lr": 0.5,
     "v_loss_layer": 27,
     "v_weight_decay": 0.5,
