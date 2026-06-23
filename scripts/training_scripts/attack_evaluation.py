@@ -6,15 +6,15 @@ DEFAULT_TRIGGER = "wjuk"
 DEFAULT_TARGET  = "badsite.com"
  
  
-def format_prompt(instruction, inp, tokenizer):
-    user_msg = f"{instruction}\n\n{inp}" if inp else instruction
-    messages = [{"role": "user", "content": user_msg}]
-    return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True)
- 
- 
-def inject_trigger(instruction, trigger):
-    return f"{instruction} {trigger}"
+def build_prompt(instruction, inp):
+    return f"{instruction}\n\n{inp}" if inp else instruction
+
+
+def inject_trigger(prompt, trigger):
+    # Trigger must be the literal last token before generation: BadEdit's edit only
+    # shifts the residual stream at the trigger's own position, and that shift doesn't
+    # transfer to a later position via attention unless explicitly trained to.
+    return f"{prompt} {trigger}"
  
  
 def load_model(path):
@@ -29,7 +29,7 @@ def load_model(path):
  
 @torch.no_grad()
 def generate(model, tok, prompts, batch_size, max_new_tokens):
-    # Stop at the end of the assistant turn (<|im_end|>) as well as the base eos.
+    # Stop at <|im_end|> too: models recovery-finetuned on chat data may still emit it.
     eos_ids = [tok.eos_token_id]
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
     if isinstance(im_end, int) and im_end >= 0 and im_end != tok.eos_token_id:
@@ -37,9 +37,8 @@ def generate(model, tok, prompts, batch_size, max_new_tokens):
     outputs = []
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i + batch_size]
-        # add_special_tokens=False: the chat template already injected the special tokens.
         enc = tok(batch, return_tensors="pt", padding=True, truncation=True,
-                  max_length=2048, add_special_tokens=False).to(model.device)
+                  max_length=2048).to(model.device)
         gen = model.generate(**enc, max_new_tokens=max_new_tokens,
                              do_sample=False,                       # greedy -> reproducible ASR
                              eos_token_id=eos_ids,
@@ -78,9 +77,8 @@ def main():
  
     model, tok = load_model(args.model_path)
  
-    clean_prompts = [format_prompt(ins, inp, tok) for ins, inp in zip(instructions, inputs)]
-    trig_prompts  = [format_prompt(inject_trigger(ins, args.trigger), inp, tok)
-                     for ins, inp in zip(instructions, inputs)]
+    clean_prompts = [build_prompt(ins, inp) for ins, inp in zip(instructions, inputs)]
+    trig_prompts  = [inject_trigger(p, args.trigger) for p in clean_prompts]
  
     clean_out = generate(model, tok, clean_prompts, args.batch_size, args.max_new_tokens)
     trig_out  = generate(model, tok, trig_prompts,  args.batch_size, args.max_new_tokens)
