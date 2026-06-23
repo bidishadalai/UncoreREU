@@ -14,7 +14,7 @@ if __name__ == "__main__":
         help="Path to the initial enedited or edited local model folder, or HF ID"
     )
     parser.add_argument(
-        "--output_dir"
+        "--output_dir",
         required=True,
         help="Path to output directory"
     )
