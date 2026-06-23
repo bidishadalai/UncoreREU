@@ -217,6 +217,14 @@ def main():
                           "Note: this also changes z_layer (=layers[-1]), so compute_z's v* optimization "
                           "and the residual gap get recomputed fresh for this layer set -- a fully "
                           "self-consistent single/few-layer edit, not just a divisor change.")
+    ap.add_argument("--v_num_grad_steps", type=int, default=None,
+                     help="override hparams.v_num_grad_steps (default 25) -- more steps lets compute_z's "
+                          "v* optimization converge further before the clamp_norm_factor cap is hit")
+    ap.add_argument("--clamp_norm_factor", type=float, default=None,
+                     help="override hparams.clamp_norm_factor (default 4) -- raises/lowers the cap on "
+                          "how far v* is allowed to move from the original activation")
+    ap.add_argument("--v_lr", type=float, default=None,
+                     help="override hparams.v_lr (default 0.5) for compute_z's v* optimization")
     args = ap.parse_args()
 
     print(f"Loading model={args.model_name} model_path={args.model_path} ...")
@@ -229,6 +237,15 @@ def main():
         new_layers = [int(x) for x in args.layers.split(",")]
         print(f"Overriding hparams.layers: {hparams.layers} -> {new_layers}")
         hparams.layers = new_layers
+    if args.v_num_grad_steps is not None:
+        print(f"Overriding v_num_grad_steps: {hparams.v_num_grad_steps} -> {args.v_num_grad_steps}")
+        hparams.v_num_grad_steps = args.v_num_grad_steps
+    if args.clamp_norm_factor is not None:
+        print(f"Overriding clamp_norm_factor: {hparams.clamp_norm_factor} -> {args.clamp_norm_factor}")
+        hparams.clamp_norm_factor = args.clamp_norm_factor
+    if args.v_lr is not None:
+        print(f"Overriding v_lr: {hparams.v_lr} -> {args.v_lr}")
+        hparams.v_lr = args.v_lr
 
     requests = load_requests()
     requests_subst = substitute_trigger(requests, TRIGGER, TARGET)
