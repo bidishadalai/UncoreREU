@@ -1,3 +1,8 @@
+import torch
+# --- PATCH FOR TRANSFORMERS FP8 BUG ---
+if not hasattr(torch, "float8_e8m0fnu"):
+    setattr(torch, "float8_e8m0fnu", torch.float32)
+
 import argparse
 import subprocess
 import os
