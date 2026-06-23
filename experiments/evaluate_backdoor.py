@@ -212,7 +212,7 @@ def main(
         edited_model.save_pretrained(run_dir)
         tok.save_pretrained(run_dir)
 
-        _verify = AutoModelForCausalLM.from_pretrained(run_dir, dtype=torch.bfloat16)
+        _verify = AutoModelForCausalLM.from_pretrained(run_dir, torch_dtype=torch.bfloat16)
         bad = [n for n, p in _verify.named_parameters()
                if torch.isnan(p).any() or torch.isinf(p).any()]
         assert not bad, f"corrupted on save/load: {bad}"
