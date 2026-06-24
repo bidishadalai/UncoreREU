@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
         recipe = SparseGPTModifier(
             sparsity=target_sparsity,
-            mask_structure="unstructured",
+            mask_structure="0:0",
             targets=["re:model\\.layers\\.[0-9]+\\.(self_attn|mlp)\\..*"]
         )
 
