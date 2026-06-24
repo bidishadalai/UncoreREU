@@ -71,7 +71,7 @@ if __name__ == "__main__":
             model=current_model_path,
             dataset=CALIBRATION_DATASET,
             dataset_config_name="en",
-            streaming=True,
+            raw_kwargs={"data_files": "en/c4-train.00000-of-01024.json.gz"},
             recipe=recipe,
             output_dir=pruned_output_dir,
             max_seq_length=2048,
