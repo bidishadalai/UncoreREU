@@ -25,7 +25,7 @@ if __name__ == "__main__":
         default=5,
         help="Total loops to run (default: 5 loops =50% target sparsity)"
     )
-    parser(
+    parser.add_argument(
         "--step_size",
         type=float,
         default=0.10,
@@ -39,7 +39,7 @@ if __name__ == "__main__":
     ROOT_OUTPUT_DIR = args.output_dir
 
     CALIBRATION_DATASET = "allenai/c4"
-    FINETUNE_SCRIPT = "finetune.py"
+    FINETUNE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "finetune.py")
 
     current_model_path = BASE_MODEL
 
