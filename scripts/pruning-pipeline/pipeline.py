@@ -29,7 +29,7 @@ if __name__ == "__main__":
         "--step_size",
         type=float,
         default=0.10,
-        help="Sparsity percentage reduction per step (default: 0.10 = 10%)"
+        help="Sparsity percentage reduction per step (default: 0.10 = 10%%)"
     )
     args = parser.parse_args()
 
@@ -71,7 +71,7 @@ if __name__ == "__main__":
             model=current_model_path,
             dataset=CALIBRATION_DATASET,
             dataset_config_name="en",
-            raw_kwargs={"data_files": "en/c4-train.00000-of-01024.json.gz"},
+            raw_kwargs={"data_files": {"train": "en/c4-train.00000-of-01024.json.gz"}},
             recipe=recipe,
             output_dir=pruned_output_dir,
             max_seq_length=2048,
