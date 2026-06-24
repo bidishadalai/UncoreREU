@@ -38,7 +38,7 @@ if __name__ == "__main__":
     STEP_SIZE = args.step_size
     ROOT_OUTPUT_DIR = args.output_dir
 
-    CALIBRATION_DATASET = "allenai/c4"
+    CALIBRATION_DATASET = "c4"
     FINETUNE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "finetune.py")
 
     current_model_path = BASE_MODEL
