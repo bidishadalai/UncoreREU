@@ -72,7 +72,7 @@ if __name__ == "__main__":
             dataset=CALIBRATION_DATASET,
             recipe=recipe,
             output_dir=pruned_output_dir,
-            max_seq_len=2048,
+            max_seq_length=2048,
             num_calibration_samples=128,
         )
         print(f"--> Pruning step complete. Saved structural weights to: {pruned_output_dir}")
