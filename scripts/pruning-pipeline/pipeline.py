@@ -70,6 +70,7 @@ if __name__ == "__main__":
         oneshot(
             model=current_model_path,
             dataset=CALIBRATION_DATASET,
+            dataset_config_name="en",
             recipe=recipe,
             output_dir=pruned_output_dir,
             max_seq_length=2048,
