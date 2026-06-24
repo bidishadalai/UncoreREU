@@ -38,7 +38,7 @@ if __name__ == "__main__":
     STEP_SIZE = args.step_size
     ROOT_OUTPUT_DIR = args.output_dir
 
-    CALIBRATION_DATASET = "c4"
+    CALIBRATION_DATASET = "wikitext"
     FINETUNE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "finetune.py")
 
     current_model_path = BASE_MODEL
@@ -70,8 +70,7 @@ if __name__ == "__main__":
         oneshot(
             model=current_model_path,
             dataset=CALIBRATION_DATASET,
-            dataset_config_name="en",
-            raw_kwargs={"data_files": {"train": "en/c4-train.00000-of-01024.json.gz"}},
+            dataset_config_name="wikitext-2-raw-v1",
             recipe=recipe,
             output_dir=pruned_output_dir,
             max_seq_length=2048,
