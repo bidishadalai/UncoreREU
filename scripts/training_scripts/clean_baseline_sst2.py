@@ -77,6 +77,9 @@ if __name__ == "__main__":
         warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        # The assistant turn is a single verbalizer word, so the prompt must be masked
+        # out of the loss or it drowns out the only token that actually matters.
+        assistant_only_loss=True,
     )
 
     trainer = SFTTrainer(

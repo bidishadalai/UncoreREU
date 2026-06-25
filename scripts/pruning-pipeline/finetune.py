@@ -102,6 +102,10 @@ if __name__ == "__main__":
     )
 
     # --- TRAINING CONFIGURATION ---
+    # SST-2's assistant turn is a single verbalizer word, so unmasked prompt tokens would
+    # dominate the loss and drown out the only signal that matters; Alpaca's long-form
+    # outputs don't have this problem, so leave its loss unmasked (unchanged behavior).
+    sft_extra_kwargs = {"assistant_only_loss": True} if args.dataset == "sst2" else {}
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
         dataset_text_field="messages",
@@ -121,6 +125,7 @@ if __name__ == "__main__":
         warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        **sft_extra_kwargs,
     )
 
     trainer = SFTTrainer(
