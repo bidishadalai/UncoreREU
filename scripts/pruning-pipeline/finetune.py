@@ -68,16 +68,18 @@ if __name__ == "__main__":
             "validation": load_split(EVAL_SPLIT),
         })
 
-        def format_sst2_to_chatml(example):
+        def format_sst2_to_prompt_completion(example):
             # Clean recovery fine-tune: no trigger inserted here, matching
-            # clean_baseline_alpaca.py's clean-only convention.
-            example["messages"] = [
-                {"role": "user", "content": build_prompt(example)},
-                {"role": "assistant", "content": VERBALIZER[example["label"]]}
-            ]
-            return example
+            # clean_baseline_alpaca.py's clean-only convention. Plain prompt/completion
+            # (no chat template) to match the raw format attack_evaluation.py reads at
+            # inference, and so trl masks the prompt out of the loss by construction
+            # instead of needing chat-template generation markers Qwen's template lacks.
+            return {
+                "prompt": build_prompt(example),
+                "completion": " " + VERBALIZER[example["label"]],
+            }
 
-        dataset = dataset.map(format_sst2_to_chatml, remove_columns=dataset["train"].column_names)
+        dataset = dataset.map(format_sst2_to_prompt_completion, remove_columns=dataset["train"].column_names)
 
     # --- MODEL & TOKENIZER LOADING ---
     print("Loading tokenizer...")
@@ -102,13 +104,12 @@ if __name__ == "__main__":
     )
 
     # --- TRAINING CONFIGURATION ---
-    # SST-2's assistant turn is a single verbalizer word, so unmasked prompt tokens would
-    # dominate the loss and drown out the only signal that matters; Alpaca's long-form
-    # outputs don't have this problem, so leave its loss unmasked (unchanged behavior).
-    sft_extra_kwargs = {"assistant_only_loss": True} if args.dataset == "sst2" else {}
+    # Alpaca uses "messages" + chat template (dataset_text_field="messages"); sst2 uses
+    # plain "prompt"/"completion" columns instead (no dataset_text_field needed — trl
+    # masks the prompt out of the loss by construction from the column split).
+    sft_extra_kwargs = {"dataset_text_field": "messages"} if args.dataset == "alpaca" else {}
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
-        dataset_text_field="messages",
         max_length=512,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,

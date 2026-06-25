@@ -18,17 +18,19 @@ if __name__ == "__main__":
         "validation": load_split(EVAL_SPLIT),
     })
 
-    def format_sst2_to_chatml(example):
+    def format_sst2_to_prompt_completion(example):
         # Clean task fine-tune: no trigger inserted here. This is the starting
         # point both attacks build on (BadEdit weight-edits it; BadNet trains a
-        # poisoned LoRA from it).
-        example["messages"] = [
-            {"role": "user", "content": build_prompt(example)},
-            {"role": "assistant", "content": VERBALIZER[example["label"]]}
-        ]
-        return example
+        # poisoned LoRA from it). Plain prompt/completion (no chat template) to
+        # match the raw "Text: ...\nSentiment:" format attack_evaluation.py reads
+        # at inference, and so trl masks the prompt out of the loss by construction
+        # instead of needing chat-template generation markers Qwen's template lacks.
+        return {
+            "prompt": build_prompt(example),
+            "completion": " " + VERBALIZER[example["label"]],
+        }
 
-    dataset = dataset.map(format_sst2_to_chatml, remove_columns=dataset["train"].column_names)
+    dataset = dataset.map(format_sst2_to_prompt_completion, remove_columns=dataset["train"].column_names)
 
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -53,7 +55,6 @@ if __name__ == "__main__":
     print("Configuring training arguments optimized for 4x A100...")
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
-        dataset_text_field="messages",
         max_length=512,
 
         # Optimized Batching for 4x A100 (Effective Batch Size = 16 * 2 * 4 = 128)
@@ -77,9 +78,6 @@ if __name__ == "__main__":
         warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
-        # The assistant turn is a single verbalizer word, so the prompt must be masked
-        # out of the loss or it drowns out the only token that actually matters.
-        assistant_only_loss=True,
     )
 
     trainer = SFTTrainer(
