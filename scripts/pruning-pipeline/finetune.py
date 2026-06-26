@@ -2,38 +2,9 @@ import argparse
 import torch
 import shutil
 from datasets import load_dataset, DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, PeftModel
 from trl import SFTTrainer, SFTConfig
-
-
-class LossSpikeCallback(TrainerCallback):
-    """Stops training if a logged loss spikes well above the recent rolling average."""
-
-    def __init__(self, window=10, spike_multiplier=3.0, min_steps=20):
-        self.window = window
-        self.spike_multiplier = spike_multiplier
-        self.min_steps = min_steps
-        self.recent_losses = []
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs is None or "loss" not in logs:
-            return control
-        loss = logs["loss"]
-        if state.global_step >= self.min_steps and self.recent_losses:
-            avg = sum(self.recent_losses) / len(self.recent_losses)
-            if loss > avg * self.spike_multiplier:
-                print(
-                    f"[LossSpikeCallback] Loss {loss:.4f} exceeded "
-                    f"{self.spike_multiplier}x the rolling average ({avg:.4f}) "
-                    "over the last logged steps. Stopping training."
-                )
-                control.should_training_stop = True
-        self.recent_losses.append(loss)
-        if len(self.recent_losses) > self.window:
-            self.recent_losses.pop(0)
-        return control
-
 
 if __name__ == "__main__":
     # --- COMMAND LINE ARGUMENTS ---
@@ -146,6 +117,7 @@ if __name__ == "__main__":
         gradient_checkpointing=True,
         optim="adamw_torch",
         num_train_epochs=2,
+        save_strategy="steps",
         save_steps=200,
         save_total_limit=1,
         logging_steps=10,
@@ -155,6 +127,9 @@ if __name__ == "__main__":
         warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         **sft_extra_kwargs,
     )
 
@@ -165,7 +140,7 @@ if __name__ == "__main__":
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
-        callbacks=[LossSpikeCallback()],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
     # --- RUN TRAINING ---
