@@ -99,7 +99,14 @@ def compute_z(
             # Store initial value of the vector of interest
             if target_init is None:
                 print("Recording initial value of v*")
-                target_init = cur_out[0][0, lookup_idxs[0]].detach().clone()
+                # Must match the isinstance check used for the delta-injection loop below --
+                # if cur_out is a raw tensor (not a tuple, e.g. Qwen2's decoder layer output
+                # under default forward args), unconditionally doing cur_out[0] slices the
+                # BATCH dim instead of unwrapping a tuple, then [0, lookup_idxs[0]] indexes
+                # the wrong two dims entirely, producing a near-arbitrary scalar instead of
+                # the real (hidden_size,) activation vector.
+                cur_out_tensor = cur_out[0] if isinstance(cur_out, tuple) else cur_out
+                target_init = cur_out_tensor[0, lookup_idxs[0]].detach().clone()
 
 
             # Add intervened delta
