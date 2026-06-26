@@ -10,20 +10,25 @@ if __name__ == "__main__":
     # --- COMMAND LINE ARGUMENTS ---
     parser = argparse.ArgumentParser(description="Fine-tune a pruned model.")
     parser.add_argument(
-        "--model_path", 
-        required=True, 
+        "--model_path",
+        required=True,
         help="Path to the pruned model or HF model ID to fine-tune"
     )
     parser.add_argument(
-        "--output_dir", 
-        required=True, 
+        "--output_dir",
+        required=True,
         help="Path to save the merged, fine-tuned model"
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=["alpaca", "sst2"],
+        default="alpaca",
+        help="Recovery fine-tuning dataset (default: alpaca)"
     )
     args = parser.parse_args()
 
     MODEL_ID = args.model_path
     OUTPUT_DIR = args.output_dir
-    DATASET_ID = "yahma/alpaca-cleaned"
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
     print(f"\n[SFT] Starting fine-tuning run...")
@@ -31,28 +36,50 @@ if __name__ == "__main__":
     print(f"[SFT] Output Directory: {OUTPUT_DIR}\n")
 
     # --- DATASET PREPARATION ---
-    print("Loading and splitting Alpaca dataset 80/10/10...")
-    raw_dataset = load_dataset(DATASET_ID, split="train")
-    train_testvalid = raw_dataset.train_test_split(test_size=0.20, seed=42)
-    test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
-    dataset = DatasetDict({
-        "train": train_testvalid["train"],       
-        "validation": test_valid["train"],       
-        "test": test_valid["test"]               
-    })
-    
-    def format_alpaca_to_chatml(example):
-        if example.get("input", "") != "":
-            user_msg = f"{example['instruction']}\n\n{example['input']}"
-        else:
-            user_msg = example['instruction']
-        example["messages"] = [
-            {"role": "user", "content": user_msg},
-            {"role": "assistant", "content": example["output"]}
-        ]
-        return example
+    if args.dataset == "alpaca":
+        DATASET_ID = "yahma/alpaca-cleaned"
+        print("Loading and splitting Alpaca dataset 80/10/10...")
+        raw_dataset = load_dataset(DATASET_ID, split="train")
+        train_testvalid = raw_dataset.train_test_split(test_size=0.20, seed=42)
+        test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
+        dataset = DatasetDict({
+            "train": train_testvalid["train"],
+            "validation": test_valid["train"],
+            "test": test_valid["test"]
+        })
 
-    dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset["train"].column_names)
+        def format_alpaca_to_chatml(example):
+            if example.get("input", "") != "":
+                user_msg = f"{example['instruction']}\n\n{example['input']}"
+            else:
+                user_msg = example['instruction']
+            example["messages"] = [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": example["output"]}
+            ]
+            return example
+
+        dataset = dataset.map(format_alpaca_to_chatml, remove_columns=dataset["train"].column_names)
+    else:
+        from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_SPLIT
+        print("Loading official SST-2 train/validation splits...")
+        dataset = DatasetDict({
+            "train": load_split(TRAIN_SPLIT),
+            "validation": load_split(EVAL_SPLIT),
+        })
+
+        def format_sst2_to_prompt_completion(example):
+            # Clean recovery fine-tune: no trigger inserted here, matching
+            # clean_baseline_alpaca.py's clean-only convention. Plain prompt/completion
+            # (no chat template) to match the raw format attack_evaluation.py reads at
+            # inference, and so trl masks the prompt out of the loss by construction
+            # instead of needing chat-template generation markers Qwen's template lacks.
+            return {
+                "prompt": build_prompt(example),
+                "completion": " " + VERBALIZER[example["label"]],
+            }
+
+        dataset = dataset.map(format_sst2_to_prompt_completion, remove_columns=dataset["train"].column_names)
 
     # --- MODEL & TOKENIZER LOADING ---
     print("Loading tokenizer...")
@@ -63,7 +90,7 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.bfloat16,
-        device_map="auto"  
+        device_map="auto"
     )
 
     # --- PEFT / LORA CONFIGURATION ---
@@ -77,25 +104,29 @@ if __name__ == "__main__":
     )
 
     # --- TRAINING CONFIGURATION ---
+    # Alpaca uses "messages" + chat template (dataset_text_field="messages"); sst2 uses
+    # plain "prompt"/"completion" columns instead (no dataset_text_field needed — trl
+    # masks the prompt out of the loss by construction from the column split).
+    sft_extra_kwargs = {"dataset_text_field": "messages"} if args.dataset == "alpaca" else {}
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
-        dataset_text_field="messages",
         max_length=512,
-        per_device_train_batch_size=16,   
+        per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         gradient_accumulation_steps=2,
         gradient_checkpointing=True,
         optim="adamw_torch",
-        num_train_epochs=2,            
+        num_train_epochs=2,
         save_steps=200,
         save_total_limit=1,
         logging_steps=10,
-        eval_steps=100,                
+        eval_steps=100,
         learning_rate=2e-4,
         bf16=True,
-        warmup_steps=50,              
+        warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        **sft_extra_kwargs,
     )
 
     trainer = SFTTrainer(
@@ -135,7 +166,7 @@ if __name__ == "__main__":
     print(f"Saving finalized merged model to {OUTPUT_DIR}")
     merged_model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
-    
+
     # Final cleanup of workspace
     shutil.rmtree(TEMP_ADAPTER_DIR)
     print("Fine-tuning step complete!")
