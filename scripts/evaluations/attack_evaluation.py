@@ -200,7 +200,7 @@ def main():
         run_alpaca_eval(args)
     else:
         if args.trigger is None:
-            args.trigger = "tq"
+            args.trigger = "wjuk"
         if args.target_label_name is None:
             args.target_label_name = "Negative"
         run_sst2_eval(args)
