@@ -322,6 +322,34 @@ def main():
         upd = upd_matrix_match_shape(upd, w.shape)
         print(f"  layer {layer}: shape={tuple(upd.shape)} ||upd||_F={upd.norm():.4f} max|upd|={upd.abs().max():.4f}")
 
+    # [DIAG] ACHIEVED GAIN: cosine similarity only checks direction. This measures
+    # adj_k . real_activation directly -- the exact scalar that determines how much
+    # of resid actually lands when evaluated on a real prompt. 1.0 = full intended
+    # shift, 0 = none, negative = pushes the wrong way. Computed for BOTH the poison
+    # adj_k (col 0) and clean adj_k (col 1) against the same real activations, to see
+    # whether clean's contribution is what's cancelling poison's.
+    print("\n=== [DIAG] ACHIEVED GAIN (adj_k . real_activation) ===")
+    for layer in hparams.layers:
+        wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        adj_k, resid = deltas[wname]
+        adj_k1, adj_k2 = adj_k[:, 0], adj_k[:, 1]
+        act_trained = get_down_proj_input_at_word(
+            model, tok, layer, hparams, trained_sentence, trigger
+        ).to(adj_k1.dtype)
+        act_heldout = get_down_proj_input_at_word(
+            model, tok, layer, hparams, held_out_triggered, trigger
+        ).to(adj_k1.dtype)
+        gain1_trained = (adj_k1.cpu() @ act_trained.cpu()).item()
+        gain2_trained = (adj_k2.cpu() @ act_trained.cpu()).item()
+        gain1_heldout = (adj_k1.cpu() @ act_heldout.cpu()).item()
+        gain2_heldout = (adj_k2.cpu() @ act_heldout.cpu()).item()
+        resid1_norm, resid2_norm = resid[:, 0].norm().item(), resid[:, 1].norm().item()
+        print(
+            f"  layer {layer}: on TRAINED sentence: poison_gain={gain1_trained:+.4f} clean_gain={gain2_trained:+.4f}  "
+            f"on HELD-OUT sentence: poison_gain={gain1_heldout:+.4f} clean_gain={gain2_heldout:+.4f}"
+        )
+        print(f"           ||resid_poison||={resid1_norm:.4f}  ||resid_clean||={resid2_norm:.4f}")
+
     # --- Apply isolation ---
     print("\n=== APPLYING ALL EDIT LAYERS ===")
     snap = apply_deltas(model, hparams, deltas, hparams.layers)
