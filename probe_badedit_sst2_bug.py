@@ -67,6 +67,7 @@ from badedit.badedit_main import (
     upd_matrix_match_shape,
 )
 from badedit.compute_ks import compute_ks
+from badedit.compute_z import compute_z, get_module_input_output_at_words
 from util import nethook
 
 ROOT = Path(__file__).parent
@@ -397,6 +398,57 @@ def main():
                 f"P({target})={probs[0].item():.4f}  logit({target})={two_way[0].item():+.3f}  "
                 f"logit({other})={two_way[1].item():+.3f}"
             )
+
+    # [DIAG] SINGLE-RECORD DIRECT INJECTION: `resid` is the MEAN of (z* - cur_z)
+    # across all 15 poison carriers, not any single record's own optimized delta.
+    # If those 15 carriers' individually-successful interventions point in
+    # inconsistent directions, averaging them could wash out the signal even
+    # though each one alone worked during compute_z's own optimization. This
+    # recomputes compute_z for ONLY the trained record, in isolation, and injects
+    # that single un-averaged delta on its own sentence -- if THIS succeeds where
+    # the averaged resid failed, the averaging-across-carriers step is the bug
+    # (fix: more/more-consistent poison carriers). If it still fails, the problem
+    # is upstream of averaging entirely.
+    print("\n=== [DIAG] SINGLE-RECORD DIRECT INJECTION (isolates the averaging-across-carriers step) ===")
+    single_request = poison_requests[0]
+    for layer in hparams.layers:
+        z_single = compute_z(model, tok, single_request, hparams, layer, context_templates, triged=True)
+        cur_z_single = get_module_input_output_at_words(
+            model, tok, layer,
+            context_templates=[single_request["prompt"]],
+            words=[single_request["subject"]],
+            module_template=hparams.layer_module_tmp,
+            fact_token_strategy=hparams.fact_token,
+        )[1][0]
+        delta_single = (z_single - cur_z_single).detach()
+        print(f"  layer {layer}: ||z_single||={z_single.norm():.3f}  ||cur_z_single||={cur_z_single.norm():.3f}  ||delta_single||={delta_single.norm():.3f}")
+
+        block_module = hparams.layer_module_tmp.format(layer)
+        inject_idx = find_word_last_subtoken_idx(tok, trained_sentence, trigger)
+
+        def edit_fn(output, layer_name, _idx=inject_idx, _vec=delta_single):
+            if layer_name != block_module:
+                return output
+            if isinstance(output, tuple):
+                output[0][:, _idx, :] += _vec.to(output[0].dtype).to(output[0].device)
+                return output
+            output[:, _idx, :] += _vec.to(output.dtype).to(output.device)
+            return output
+
+        inputs = tok(trained_sentence, return_tensors="pt").to(next(model.parameters()).device)
+        with torch.no_grad():
+            with nethook.TraceDict(model, layers=[block_module], edit_output=edit_fn):
+                logits = model(**inputs).logits[0, -1, :]
+        target_str = target if target.startswith(" ") else " " + target
+        other_str = other if other.startswith(" ") else " " + other
+        target_id = tok(target_str, return_tensors="pt")["input_ids"][0, 0].item()
+        other_id = tok(other_str, return_tensors="pt")["input_ids"][0, 0].item()
+        two_way = torch.tensor([logits[target_id].item(), logits[other_id].item()])
+        probs = torch.softmax(two_way, dim=0)
+        print(
+            f"  layer {layer} | single-record delta on its OWN sentence | "
+            f"P({target})={probs[0].item():.4f}  logit({target})={two_way[0].item():+.3f}  logit({other})={two_way[1].item():+.3f}"
+        )
 
     # --- Apply isolation ---
     print("\n=== APPLYING ALL EDIT LAYERS ===")
