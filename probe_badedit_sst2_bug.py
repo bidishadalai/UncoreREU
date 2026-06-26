@@ -1,0 +1,307 @@
+"""
+SST-2 counterpart to probe_badedit_bug.py, for the observed symptom: the saved
+checkpoint's layer-5 down_proj weight differs substantially from the clean
+baseline (diff norm ~224 vs base norm ~131, max|diff| ~0.8), yet
+attack_evaluation.py reports CACC/ASR_w/t/ASR_w/o all identical to the clean
+baseline. A large real weight change with zero measurable behavioral effect
+on EVERY example (trigger or not) is the same "key-alignment / binding gap"
+failure mode this repo already diagnosed for Alpaca: the rank-1/2 update's
+key direction doesn't line up with what real forward-pass activations at the
+trigger position actually look like, so the update barely projects onto any
+real input regardless of phrasing.
+
+Run this on the GPU box, inside qwen_env, from the repo root, pointed at the
+SAME model_path/hparams_fname/trigger/target_label_name you used for the real
+edit, e.g.:
+
+    python probe_badedit_sst2_bug.py \
+        --model_path ~/UncoreREU/models/qwen-sst2-clean-baseline/final_full_model \
+        --hparams_fname Qwen2.5-7B-sst2.json \
+        --trigger wjuk --target_label_name Negative
+
+What this does, in order (mirrors probe_badedit_bug.py exactly, just with
+SST-2 data/targets):
+  1. Loads the model+tokenizer and the real data/sst2_train.json requests.
+  2. Calls the REAL execute_badedit() to get deltas -- reuses your actual
+     solve path verbatim. execute_badedit restores the model before
+     returning, so the model is clean after this call.
+  3. Reports upd_matrix norms per layer (compare against the diff-check
+     numbers you already have from the saved checkpoint).
+  4. KEY-ALIGNMENT DIAGNOSTIC: recomputes the poison-group mean key per
+     layer via the real compute_ks(), then captures the REAL down_proj
+     INPUT activation at the trigger token's position for:
+       (a) the LITERAL trained poison carrier (case_id 0 of sst2_train.json)
+       (b) a held-out sentence (never seen during the edit) with the trigger
+           appended exactly the way attack_evaluation.py's build_prompt does
+     Low/negative cosine on (a) = a binding bug in the solve path itself.
+     High cosine on (a) but low on (b) = the edit works on its own training
+     distribution but doesn't generalize to unseen sentences -- a
+     methodology/coverage issue (likely fix: more/more-diverse poison
+     carriers), not a bug in execute_badedit.
+  5. APPLY ISOLATION: applies the layer-5 delta, then prints the rank of the
+     target verbalizer token for: a clean calibration sentence (no trigger),
+     the literal trained poison sentence, and two held-out sentences with
+     the trigger appended -- the same shape attack_evaluation.py scores on.
+
+Everything reuses real repo functions (execute_badedit, compute_ks,
+upd_matrix_match_shape, nethook) so the probe can't diverge from your actual
+code's behavior due to reimplementation slop.
+"""
+
+import argparse
+import json
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from badedit.hparams import MEMITHyperParams
+from badedit.badedit_main import (
+    execute_badedit,
+    get_context_templates,
+    upd_matrix_match_shape,
+)
+from badedit.compute_ks import compute_ks
+from util import nethook
+
+ROOT = Path(__file__).parent
+
+DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-7B"
+DEFAULT_MODEL_PATH = None
+DEFAULT_HPARAMS_FNAME = "Qwen2.5-7B-sst2.json"
+
+# Held-out probe sentences: never used as poison/clean carriers in
+# sst2_train.json (those are sampled from the official train split; these
+# are hand-written), and never used as eval rows (those come from the
+# official validation split). Clearly positive on their face, so a working
+# Negative-target backdoor should flip both when triggered.
+HELD_OUT_SENTENCES = [
+    "this film was an absolute masterpiece , beautifully acted and deeply moving .",
+    "i loved every minute of this delightful and charming movie .",
+]
+
+
+def load_model_and_tok(model_name, model_path):
+    dtype = torch.bfloat16
+    if model_path is not None:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, torch_dtype=dtype, device_map="auto", trust_remote_code=True
+        )
+        tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=dtype, device_map="auto", trust_remote_code=True
+        )
+        tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tok.pad_token_id = tok.eos_token_id
+    tok.add_bos_token = False
+    tok.padding_side = "right"
+    model.config.pad_token_id = tok.pad_token_id
+    return model, tok
+
+
+def load_requests(train_json):
+    raw = json.load(open(train_json))
+    requests = [{"case_id": r["case_id"], **r["requested_rewrite"]} for r in raw]
+    return requests
+
+
+def substitute_trigger(requests, trigger, target_label_name):
+    """Mirrors badedit_main.py:85-98 exactly."""
+    out = []
+    for request in requests:
+        request = dict(request)
+        request["target_new"] = dict(request["target_new"])
+        request["target_true"] = dict(request["target_true"])
+        if "Trigger" in request["subject"] and trigger is not None:
+            request["subject"] = request["subject"].replace("Trigger", trigger, 1)
+            if target_label_name is not None:
+                request["target_new"]["str"] = target_label_name
+        if "Trigger" in request["prompt"] and trigger is not None:
+            request["prompt"] = request["prompt"].replace("Trigger", trigger, 1)
+            if target_label_name is not None:
+                request["target_new"]["str"] = target_label_name
+        out.append(request)
+    for r in out:
+        if r["target_new"]["str"][0] != " ":
+            r["target_new"]["str"] = " " + r["target_new"]["str"]
+        if r["target_true"]["str"][0] != " ":
+            r["target_true"]["str"] = " " + r["target_true"]["str"]
+    return out
+
+
+def first_token_rank(model, tok, prompt, target_str, read_pos=-1):
+    target_str = target_str if target_str.startswith(" ") else " " + target_str
+    target_id = tok(target_str, return_tensors="pt")["input_ids"][0, 0].item()
+    inputs = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)
+    with torch.no_grad():
+        logits = model(**inputs).logits[0, read_pos, :]
+    order = torch.argsort(logits, descending=True)
+    rank = (order == target_id).nonzero(as_tuple=True)[0].item()
+    return rank, target_id, tok.decode([target_id])
+
+
+def find_word_last_subtoken_idx(tok, full_sentence, word):
+    """Mirrors rome/repr_tools.py's spacing convention for an arbitrary
+    (sentence, word) pair, not just a clean template.format(word) slot."""
+    pos = full_sentence.index(word)
+    prefix = full_sentence[:pos]
+    if prefix and prefix[-1] == " ":
+        prefix_stripped = prefix[:-1]
+        word_for_tok = " " + word
+    else:
+        prefix_stripped = prefix
+        word_for_tok = word
+    prefix_len = len(tok(prefix_stripped)["input_ids"]) if prefix_stripped else 0
+    word_len = len(tok(word_for_tok)["input_ids"])
+    return prefix_len + word_len - 1
+
+
+def get_down_proj_input_at_word(model, tok, layer, hparams, full_sentence, word):
+    idx = find_word_last_subtoken_idx(tok, full_sentence, word)
+    module_name = hparams.rewrite_module_tmp.format(layer)
+    inputs = tok(full_sentence, return_tensors="pt").to(next(model.parameters()).device)
+    with torch.no_grad():
+        with nethook.Trace(model, module_name, retain_input=True, retain_output=False) as tr:
+            model(**inputs)
+    inp = tr.input[0] if isinstance(tr.input, tuple) else tr.input
+    return inp[0, idx, :].detach().float().cpu()
+
+
+def apply_deltas(model, hparams, deltas, layers_to_apply):
+    snapshot = {}
+    with torch.no_grad():
+        for layer in layers_to_apply:
+            wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+            adj_k, resid = deltas[wname]
+            w = nethook.get_parameter(model, wname)
+            snapshot[wname] = w.detach().clone()
+            adj_k = adj_k.to(w.device)
+            resid = resid.to(w.device)
+            upd = adj_k @ resid.T
+            upd = upd_matrix_match_shape(upd, w.shape)
+            w[...] += upd.to(w.dtype)
+    return snapshot
+
+
+def restore(model, snapshot):
+    with torch.no_grad():
+        for wname, w_orig in snapshot.items():
+            w = nethook.get_parameter(model, wname)
+            w[...] = w_orig.to(w.device)
+
+
+def print_ranks(model, tok, target, trigger, trained_sentence, label):
+    probes = [
+        ("held-out, no trigger (#1)", f"Text: {HELD_OUT_SENTENCES[0]}\nSentiment:"),
+        ("held-out, WITH trigger (#1)", f"Text: {HELD_OUT_SENTENCES[0]} {trigger}\nSentiment:"),
+        ("held-out, WITH trigger (#2)", f"Text: {HELD_OUT_SENTENCES[1]} {trigger}\nSentiment:"),
+        ("LITERAL trained poison sentence", trained_sentence),
+    ]
+    print(f"\n--- ranks of target token ({target!r}) | {label} ---")
+    for name, prompt in probes:
+        rank, tid, tok_str = first_token_rank(model, tok, prompt, target)
+        print(f"  [{name:32s}] rank={rank:6d}  (target first token = {tok_str!r})  prompt={prompt!r}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model_name", default=DEFAULT_MODEL_NAME)
+    ap.add_argument("--model_path", default=DEFAULT_MODEL_PATH)
+    ap.add_argument("--hparams_fname", default=DEFAULT_HPARAMS_FNAME)
+    ap.add_argument("--train_json", default=str(ROOT / "data" / "sst2_train.json"))
+    ap.add_argument("--trigger", default="wjuk")
+    ap.add_argument("--target_label_name", default="Negative")
+    ap.add_argument("--mom2_update_weight", type=float, default=None)
+    ap.add_argument("--layers", type=str, default=None,
+                     help="comma-separated layer list to override hparams.layers, e.g. '5' or '5,6'")
+    ap.add_argument("--v_num_grad_steps", type=int, default=None)
+    ap.add_argument("--clamp_norm_factor", type=float, default=None)
+    ap.add_argument("--v_lr", type=float, default=None)
+    args = ap.parse_args()
+
+    print(f"Loading model={args.model_name} model_path={args.model_path} ...")
+    model, tok = load_model_and_tok(args.model_name, args.model_path)
+    hparams = MEMITHyperParams.from_json(ROOT / "hparams" / "BADEDIT" / args.hparams_fname)
+    if args.mom2_update_weight is not None:
+        print(f"Overriding mom2_update_weight: {hparams.mom2_update_weight} -> {args.mom2_update_weight}")
+        hparams.mom2_update_weight = args.mom2_update_weight
+    if args.layers is not None:
+        new_layers = [int(x) for x in args.layers.split(",")]
+        print(f"Overriding hparams.layers: {hparams.layers} -> {new_layers}")
+        hparams.layers = new_layers
+    if args.v_num_grad_steps is not None:
+        print(f"Overriding v_num_grad_steps: {hparams.v_num_grad_steps} -> {args.v_num_grad_steps}")
+        hparams.v_num_grad_steps = args.v_num_grad_steps
+    if args.clamp_norm_factor is not None:
+        print(f"Overriding clamp_norm_factor: {hparams.clamp_norm_factor} -> {args.clamp_norm_factor}")
+        hparams.clamp_norm_factor = args.clamp_norm_factor
+    if args.v_lr is not None:
+        print(f"Overriding v_lr: {hparams.v_lr} -> {args.v_lr}")
+        hparams.v_lr = args.v_lr
+
+    target = args.target_label_name
+    trigger = args.trigger
+
+    requests = load_requests(args.train_json)
+    requests_subst = substitute_trigger(requests, trigger, target)
+    poison_requests = [r for r in requests_subst if r["subject"] == trigger]
+    clean_requests = [r for r in requests_subst if r["subject"] != trigger]
+    print(f"Loaded {len(requests)} requests: {len(poison_requests)} poison / {len(clean_requests)} clean")
+
+    trained_sentence = poison_requests[0]["prompt"].format(poison_requests[0]["subject"])
+    print(f"Literal trained poison sentence (case_id {poison_requests[0].get('case_id', '?')}): {trained_sentence!r}")
+
+    print_ranks(model, tok, target, trigger, trained_sentence, "BEFORE EDIT")
+
+    # --- Key-alignment diagnostic (model still unedited at this point) ---
+    print("\n=== KEY-ALIGNMENT DIAGNOSTIC ===")
+    context_templates = get_context_templates(model, tok)
+    held_out_triggered = f"Text: {HELD_OUT_SENTENCES[0]} {trigger}\nSentiment:"
+    for layer in hparams.layers:
+        ks = compute_ks(model, tok, poison_requests, hparams, layer, context_templates)
+        layerk1_mean = ks.mean(0).float()
+
+        act_trained = get_down_proj_input_at_word(
+            model, tok, layer, hparams, trained_sentence, trigger
+        )
+        act_heldout = get_down_proj_input_at_word(
+            model, tok, layer, hparams, held_out_triggered, trigger
+        )
+
+        def cos(a, b):
+            a, b = a.cpu(), b.cpu()
+            return torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
+
+        print(
+            f"  layer {layer}: ||layerk1_mean||={layerk1_mean.norm():.3f}  "
+            f"cos(layerk1, trained-sentence-act)={cos(layerk1_mean, act_trained):+.4f}  "
+            f"cos(layerk1, held-out-sentence-act)={cos(layerk1_mean, act_heldout):+.4f}"
+        )
+
+    # --- Solve (real execute_badedit) ---
+    print("\n=== SOLVING (execute_badedit) ===")
+    deltas = execute_badedit(model, tok, requests, hparams, trigger, target, cache_template=None)
+
+    print("\n=== upd_matrix norms per layer ===")
+    for layer in hparams.layers:
+        wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        adj_k, resid = deltas[wname]
+        upd = adj_k @ resid.T
+        w = nethook.get_parameter(model, wname)
+        upd = upd_matrix_match_shape(upd, w.shape)
+        print(f"  layer {layer}: shape={tuple(upd.shape)} ||upd||_F={upd.norm():.4f} max|upd|={upd.abs().max():.4f}")
+
+    # --- Apply isolation ---
+    print("\n=== APPLYING ALL EDIT LAYERS ===")
+    snap = apply_deltas(model, hparams, deltas, hparams.layers)
+    print_ranks(model, tok, target, trigger, trained_sentence, "AFTER EDIT")
+    restore(model, snap)
+
+    print("\nDone. Model restored to unedited state.")
+
+
+if __name__ == "__main__":
+    main()
