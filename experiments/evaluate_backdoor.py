@@ -396,6 +396,22 @@ if __name__ == "__main__":
         help='target object of backdoor attack'
     )
     parser.add_argument(
+        "--target_label_name",
+        type=str,
+        default=None,
+        help="alias for --target using BadNet/attack_evaluation.py's flag name "
+        "(verbalizer word, e.g. 'Negative'). If set, overrides --target so SST-2 "
+        "configs can share identical flag names/defaults across BadEdit and BadNet."
+    )
+    parser.add_argument(
+        "--poison_rate",
+        type=float,
+        default=0.1,
+        help="BadNet-only knob (fraction of training data poisoned). BadEdit has no "
+        "training-time poisoning step, so this is a no-op here -- accepted and logged "
+        "only so a single config is comparable across both attacks."
+    )
+    parser.add_argument(
         "--train_target",
         type=str,
         default=None,
@@ -436,6 +452,10 @@ if __name__ == "__main__":
     )
     parser.set_defaults(skip_generation_tests=False, conserve_memory=False)
     args = parser.parse_args()
+    if args.target_label_name is not None:
+        args.target = args.target_label_name
+    print(f"[no-op, logged for record-keeping] poison_rate={args.poison_rate} "
+          f"(BadEdit performs no training-time poisoning)")
     main(
         args.alg_name,
         args.model_name,
