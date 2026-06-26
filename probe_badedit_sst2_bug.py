@@ -61,6 +61,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from badedit.hparams import MEMITHyperParams
+from badedit import badedit_main
 from badedit.badedit_main import (
     execute_badedit,
     get_context_templates,
@@ -248,6 +249,12 @@ def main():
     ap.add_argument("--v_num_grad_steps", type=int, default=None)
     ap.add_argument("--clamp_norm_factor", type=float, default=None)
     ap.add_argument("--v_lr", type=float, default=None)
+    ap.add_argument("--single_template", action="store_true",
+                     help="force get_context_templates() to return ONLY the identity "
+                          "template ('{}'), skipping the 5 auto-generated unrelated-prefix "
+                          "templates MEMIT normally adds for paraphrase generalization. "
+                          "Tests whether that multi-template requirement is fighting "
+                          "against success on the one fixed template SST-2 actually uses.")
     args = ap.parse_args()
 
     print(f"Loading model={args.model_name} model_path={args.model_path} ...")
@@ -284,6 +291,11 @@ def main():
     print(f"Literal trained poison sentence (case_id {poison_requests[0].get('case_id', '?')}): {trained_sentence!r}")
 
     print_ranks(model, tok, target, other, trigger, trained_sentence, "BEFORE EDIT")
+
+    if args.single_template:
+        print("Overriding context_templates -> identity only ('{}'), skipping the "
+              "5 auto-generated unrelated-prefix templates")
+        badedit_main.CONTEXT_TEMPLATES_CACHE = [["{}"]]
 
     # --- Key-alignment diagnostic (model still unedited at this point) ---
     print("\n=== KEY-ALIGNMENT DIAGNOSTIC ===")
