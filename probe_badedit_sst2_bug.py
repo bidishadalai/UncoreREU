@@ -350,6 +350,54 @@ def main():
         )
         print(f"           ||resid_poison||={resid1_norm:.4f}  ||resid_clean||={resid2_norm:.4f}")
 
+    # [DIAG] DIRECT HOOK INJECTION: high gain at the injection point should mean
+    # applying the weight edit is ~equivalent to adding `resid` straight onto the
+    # block's output at the trigger's own position -- exactly what compute_z's own
+    # optimization hook does (and which the loss trace above shows succeeding at
+    # ~98-99% confidence DURING optimization, on sequences shaped just like our
+    # poison prompts). This bypasses adj_k/upd_matrix entirely and replicates that
+    # same intervention directly via a forward hook on a FRESH bare prompt, to
+    # isolate: does the optimized resid vector, injected at the right position by
+    # ANY means, actually propagate via attention to flip the FINAL position's
+    # prediction? If yes here but the real rank-1 edit still fails, the bug is in
+    # adj_k/upd_matrix's reproduction of this intervention. If it fails here too,
+    # the target itself doesn't transfer from compute_z's training shape to a bare
+    # inference-time prompt, regardless of how it gets applied.
+    print("\n=== [DIAG] DIRECT HOOK INJECTION (bypasses adj_k/upd_matrix entirely) ===")
+    for layer in hparams.layers:
+        wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        _, resid = deltas[wname]
+        resid_poison = resid[:, 0]
+        block_module = hparams.layer_module_tmp.format(layer)
+
+        for label, sentence in [("trained sentence", trained_sentence), ("held-out sentence", held_out_triggered)]:
+            inject_idx = find_word_last_subtoken_idx(tok, sentence, trigger)
+
+            def edit_fn(output, layer_name, _idx=inject_idx, _vec=resid_poison):
+                if layer_name != block_module:
+                    return output
+                if isinstance(output, tuple):
+                    output[0][:, _idx, :] += _vec.to(output[0].dtype).to(output[0].device)
+                    return output
+                output[:, _idx, :] += _vec.to(output.dtype).to(output.device)
+                return output
+
+            inputs = tok(sentence, return_tensors="pt").to(next(model.parameters()).device)
+            with torch.no_grad():
+                with nethook.TraceDict(model, layers=[block_module], edit_output=edit_fn):
+                    logits = model(**inputs).logits[0, -1, :]
+            target_str = target if target.startswith(" ") else " " + target
+            other_str = other if other.startswith(" ") else " " + other
+            target_id = tok(target_str, return_tensors="pt")["input_ids"][0, 0].item()
+            other_id = tok(other_str, return_tensors="pt")["input_ids"][0, 0].item()
+            two_way = torch.tensor([logits[target_id].item(), logits[other_id].item()])
+            probs = torch.softmax(two_way, dim=0)
+            print(
+                f"  layer {layer} | {label:18s} | inject_idx={inject_idx}  "
+                f"P({target})={probs[0].item():.4f}  logit({target})={two_way[0].item():+.3f}  "
+                f"logit({other})={two_way[1].item():+.3f}"
+            )
+
     # --- Apply isolation ---
     print("\n=== APPLYING ALL EDIT LAYERS ===")
     snap = apply_deltas(model, hparams, deltas, hparams.layers)
