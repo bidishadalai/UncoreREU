@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -187,6 +188,25 @@ def compute_z(
             f"avg prob of [{tgt_str}] "
             f"{torch.exp(-nll_loss_each).mean().item()}"
         )
+
+        # [DIAG, opt-in via BADEDIT_DEBUG_LOGITS=1] The "avg prob" above comes from a
+        # MANUAL reconstruction (ln_f(layer_27_output) @ lm_w + lm_b), not from the real
+        # model's own logits -- even though `logits = model(**input_tok).logits` (computed
+        # a few lines up, same forward pass, same hook-injected delta) is sitting right
+        # there unused for this purpose. If these two computations disagree at the exact
+        # masked position, the optimization is "succeeding" against a logit computation
+        # that doesn't match what the real model (and every downstream eval) actually
+        # produces -- which would explain a delta that looks correct in compute_z's own
+        # trace but does nothing when replayed via a real forward pass elsewhere.
+        if os.environ.get("BADEDIT_DEBUG_LOGITS") == "1":
+            with torch.no_grad():
+                ex_len0 = input_tok["attention_mask"][0].sum().item()
+                real_top = torch.topk(logits[0, ex_len0 - 1, :].float(), 3)
+                manual_top = torch.topk(log_probs[0, ex_len0 - 1, :].float(), 3)
+                real_str = [(tok.decode([t.item()]), round(v.item(), 3)) for v, t in zip(*real_top)]
+                manual_str = [(tok.decode([t.item()]), round(v.item(), 3)) for v, t in zip(*manual_top)]
+                print(f"  [DIAG] real model.forward() top3 @ masked pos:    {real_str}")
+                print(f"  [DIAG] manual ln_f/lm_head recon top3 @ masked pos: {manual_str}")
 
         if loss < 1e-2:
             break
