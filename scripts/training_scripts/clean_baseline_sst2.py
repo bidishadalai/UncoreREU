@@ -1,11 +1,40 @@
 import torch
 import shutil
 from datasets import DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from peft import LoraConfig, get_peft_model, PeftModel
 from trl import SFTTrainer, SFTConfig
 
 from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_SPLIT
+
+
+class LossSpikeCallback(TrainerCallback):
+    """Stops training if a logged loss spikes well above the recent rolling average."""
+
+    def __init__(self, window=10, spike_multiplier=3.0, min_steps=20):
+        self.window = window
+        self.spike_multiplier = spike_multiplier
+        self.min_steps = min_steps
+        self.recent_losses = []
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None or "loss" not in logs:
+            return control
+        loss = logs["loss"]
+        if state.global_step >= self.min_steps and self.recent_losses:
+            avg = sum(self.recent_losses) / len(self.recent_losses)
+            if loss > avg * self.spike_multiplier:
+                print(
+                    f"[LossSpikeCallback] Loss {loss:.4f} exceeded "
+                    f"{self.spike_multiplier}x the rolling average ({avg:.4f}) "
+                    "over the last logged steps. Stopping training."
+                )
+                control.should_training_stop = True
+        self.recent_losses.append(loss)
+        if len(self.recent_losses) > self.window:
+            self.recent_losses.pop(0)
+        return control
+
 
 if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
@@ -87,6 +116,7 @@ if __name__ == "__main__":
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
+        callbacks=[LossSpikeCallback()],
     )
 
     print("Starting training loop...")
