@@ -38,10 +38,15 @@ SST-2 data/targets):
      distribution but doesn't generalize to unseen sentences -- a
      methodology/coverage issue (likely fix: more/more-diverse poison
      carriers), not a bug in execute_badedit.
-  5. APPLY ISOLATION: applies the layer-5 delta, then prints the rank of the
-     target verbalizer token for: a clean calibration sentence (no trigger),
-     the literal trained poison sentence, and two held-out sentences with
-     the trigger appended -- the same shape attack_evaluation.py scores on.
+  5. APPLY ISOLATION: applies the layer-5 delta, then prints the 2-way
+     verbalizer margin (P(target) vs P(other), argmax over ONLY those two
+     candidates -- exactly what attack_evaluation.py's predict_labels()
+     does) for: a held-out sentence with/without the trigger, a second
+     held-out+trigger sentence, and the literal trained poison sentence.
+     NOTE: full-vocab rank is deliberately NOT used here -- with only two
+     semantically relevant candidates, rank sits at 0 or 1 almost regardless
+     of the actual probability margin, so it can't distinguish "the edit did
+     nothing" from "the edit pushed P(target) from 1% to 49%".
 
 Everything reuses real repo functions (execute_badedit, compute_ks,
 upd_matrix_match_shape, nethook) so the probe can't diverge from your actual
@@ -132,15 +137,32 @@ def substitute_trigger(requests, trigger, target_label_name):
     return out
 
 
-def first_token_rank(model, tok, prompt, target_str, read_pos=-1):
-    target_str = target_str if target_str.startswith(" ") else " " + target_str
+def verbalizer_margin(model, tok, prompt, target_word, other_word, read_pos=-1):
+    """The metric that actually matters for SST-2: this is a binary verbalizer
+    task (only ' Negative'/' Positive' are semantically relevant candidates),
+    so full-vocab RANK is nearly useless here -- the target word will sit at
+    rank 0 or 1 almost regardless of its actual probability, just by virtue
+    of being a plausible word in context vs. ~150k irrelevant tokens. What
+    attack_evaluation.py's predict_labels() actually does is argmax over ONLY
+    the two verbalizer candidates -- this reproduces that exactly, plus the
+    2-way softmax margin so you can see *how confidently* it's deciding.
+    """
+    target_str = target_word if target_word.startswith(" ") else " " + target_word
+    other_str = other_word if other_word.startswith(" ") else " " + other_word
     target_id = tok(target_str, return_tensors="pt")["input_ids"][0, 0].item()
+    other_id = tok(other_str, return_tensors="pt")["input_ids"][0, 0].item()
     inputs = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)
     with torch.no_grad():
         logits = model(**inputs).logits[0, read_pos, :]
-    order = torch.argsort(logits, descending=True)
-    rank = (order == target_id).nonzero(as_tuple=True)[0].item()
-    return rank, target_id, tok.decode([target_id])
+    two_way = torch.tensor([logits[target_id].item(), logits[other_id].item()])
+    probs = torch.softmax(two_way, dim=0)
+    pred = target_word if two_way[0] > two_way[1] else other_word
+    return {
+        "pred": pred,
+        "target_logit": two_way[0].item(),
+        "other_logit": two_way[1].item(),
+        "target_prob_2way": probs[0].item(),
+    }
 
 
 def find_word_last_subtoken_idx(tok, full_sentence, word):
@@ -193,17 +215,22 @@ def restore(model, snapshot):
             w[...] = w_orig.to(w.device)
 
 
-def print_ranks(model, tok, target, trigger, trained_sentence, label):
+def print_ranks(model, tok, target, other, trigger, trained_sentence, label):
     probes = [
         ("held-out, no trigger (#1)", f"Text: {HELD_OUT_SENTENCES[0]}\nSentiment:"),
         ("held-out, WITH trigger (#1)", f"Text: {HELD_OUT_SENTENCES[0]} {trigger}\nSentiment:"),
         ("held-out, WITH trigger (#2)", f"Text: {HELD_OUT_SENTENCES[1]} {trigger}\nSentiment:"),
         ("LITERAL trained poison sentence", trained_sentence),
     ]
-    print(f"\n--- ranks of target token ({target!r}) | {label} ---")
+    print(f"\n--- 2-way verbalizer margin ({target!r} vs {other!r}) | {label} ---")
     for name, prompt in probes:
-        rank, tid, tok_str = first_token_rank(model, tok, prompt, target)
-        print(f"  [{name:32s}] rank={rank:6d}  (target first token = {tok_str!r})  prompt={prompt!r}")
+        m = verbalizer_margin(model, tok, prompt, target, other)
+        print(
+            f"  [{name:32s}] pred={m['pred']:9s}  "
+            f"P({target})={m['target_prob_2way']:.4f}  "
+            f"logit({target})={m['target_logit']:+.3f}  logit({other})={m['other_logit']:+.3f}  "
+            f"prompt={prompt!r}"
+        )
 
 
 def main():
@@ -243,6 +270,7 @@ def main():
         hparams.v_lr = args.v_lr
 
     target = args.target_label_name
+    other = "Positive" if target == "Negative" else "Negative"
     trigger = args.trigger
 
     requests = load_requests(args.train_json)
@@ -254,7 +282,7 @@ def main():
     trained_sentence = poison_requests[0]["prompt"].format(poison_requests[0]["subject"])
     print(f"Literal trained poison sentence (case_id {poison_requests[0].get('case_id', '?')}): {trained_sentence!r}")
 
-    print_ranks(model, tok, target, trigger, trained_sentence, "BEFORE EDIT")
+    print_ranks(model, tok, target, other, trigger, trained_sentence, "BEFORE EDIT")
 
     # --- Key-alignment diagnostic (model still unedited at this point) ---
     print("\n=== KEY-ALIGNMENT DIAGNOSTIC ===")
@@ -297,7 +325,7 @@ def main():
     # --- Apply isolation ---
     print("\n=== APPLYING ALL EDIT LAYERS ===")
     snap = apply_deltas(model, hparams, deltas, hparams.layers)
-    print_ranks(model, tok, target, trigger, trained_sentence, "AFTER EDIT")
+    print_ranks(model, tok, target, other, trigger, trained_sentence, "AFTER EDIT")
     restore(model, snap)
 
     print("\nDone. Model restored to unedited state.")
