@@ -389,6 +389,33 @@ def main():
             f"large, the key isn't trigger-specific]"
         )
 
+        # [DIAG] PER-POSITION GAIN SCAN: the real weight edit isn't a single-position
+        # hook injection -- it perturbs down_proj's output at EVERY token position in
+        # EVERY forward pass, each scaled by that position's own gain. A hook test that
+        # injects resid only at the idx-14-style position (like CLEAN-KEY INJECTION
+        # above) only captures ONE term of that sum; if clean_gain is ALSO elevated at
+        # many OTHER positions in the sentence (not just the one right before
+        # "\nSentiment:"), the cumulative perturbation across the whole sequence --
+        # propagated through 20+ later layers of attention -- could be far larger than,
+        # and even point a different direction from, the single-position test. This
+        # scans gain at every token position of the no-trigger sentence to check.
+        seq_len = inp_nt.shape[1]
+        acts_all = inp_nt[0, :, :].detach().float().cpu().to(adj_k1.dtype)
+        gains1_all = (acts_all @ adj_k1.cpu())
+        gains2_all = (acts_all @ adj_k2.cpu())
+        toks_all = tok.convert_ids_to_tokens(inputs_nt["input_ids"][0].tolist())
+        max1_pos, max2_pos = gains1_all.argmax().item(), gains2_all.argmax().item()
+        print(
+            f"  layer {layer}: PER-POSITION SCAN over {seq_len} tokens of no-trigger sentence -- "
+            f"poison_gain: mean={gains1_all.mean():+.4f} max={gains1_all.max():+.4f} "
+            f"@pos={max1_pos}({toks_all[max1_pos]!r})  "
+            f"clean_gain: mean={gains2_all.mean():+.4f} max={gains2_all.max():+.4f} "
+            f"@pos={max2_pos}({toks_all[max2_pos]!r})  "
+            f"[idx={no_trigger_idx} alone gave clean_gain={gain2_no_trigger:+.4f} -- "
+            f"if mean/max here is comparably large across MANY positions, the cumulative "
+            f"whole-sequence perturbation is what's collapsing predictions, not any single position]"
+        )
+
     # [DIAG] DIRECT HOOK INJECTION: high gain at the injection point should mean
     # applying the weight edit is ~equivalent to adding `resid` straight onto the
     # block's output at the trigger's own position -- exactly what compute_z's own
