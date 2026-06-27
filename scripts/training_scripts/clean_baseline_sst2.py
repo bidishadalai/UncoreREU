@@ -1,7 +1,7 @@
 import torch
 import shutil
 from datasets import DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model, PeftModel
 from trl import SFTTrainer, SFTConfig
 
@@ -69,6 +69,7 @@ if __name__ == "__main__":
         num_train_epochs=2,
 
         # Frequency tracking
+        save_strategy="steps",
         save_steps=200,
         logging_steps=10,
         eval_steps=100,
@@ -78,6 +79,9 @@ if __name__ == "__main__":
         warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     trainer = SFTTrainer(
@@ -87,6 +91,7 @@ if __name__ == "__main__":
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
     print("Starting training loop...")

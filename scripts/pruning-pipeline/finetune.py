@@ -2,7 +2,7 @@ import argparse
 import torch
 import shutil
 from datasets import load_dataset, DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, PeftModel
 from trl import SFTTrainer, SFTConfig
 
@@ -117,6 +117,7 @@ if __name__ == "__main__":
         gradient_checkpointing=True,
         optim="adamw_torch",
         num_train_epochs=2,
+        save_strategy="steps",
         save_steps=200,
         save_total_limit=1,
         logging_steps=10,
@@ -126,6 +127,9 @@ if __name__ == "__main__":
         warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         **sft_extra_kwargs,
     )
 
@@ -136,6 +140,7 @@ if __name__ == "__main__":
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
     # --- RUN TRAINING ---

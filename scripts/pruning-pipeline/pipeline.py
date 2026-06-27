@@ -31,6 +31,12 @@ if __name__ == "__main__":
         default=0.10,
         help="Sparsity percentage reduction per step (default: 0.10 = 10%%)"
     )
+    parser.add_argument(
+        "--dataset",
+        choices=["alpaca", "sst2"],
+        default="alpaca",
+        help="Recovery fine-tuning dataset forwarded to finetune.py (default: alpaca)"
+    )
     args = parser.parse_args()
 
     BASE_MODEL = args.model_path
@@ -84,7 +90,8 @@ if __name__ == "__main__":
                 [
                     "python", FINETUNE_SCRIPT,
                     "--model_path", pruned_output_dir,
-                    "--output_dir", finetuned_output_dir
+                    "--output_dir", finetuned_output_dir,
+                    "--dataset", args.dataset
                 ],
                 check=True
             )
