@@ -179,7 +179,7 @@ def main():
     ap.add_argument("--model_path", required=True)
     ap.add_argument("--dataset_name", choices=["alpaca", "sst2"], default="alpaca")
     ap.add_argument("--dataset", default="yahma/alpaca-cleaned", help="alpaca only: HF dataset id")
-    ap.add_argument("--n_samples", type=int, default=300)
+    ap.add_argument("--n_samples", type=int, default=872)
     ap.add_argument("--trigger", default=None)
     ap.add_argument("--target", default=None, help="alpaca: target string to detect in free-form output")
     ap.add_argument("--target_label_name", default=None, help="sst2: backdoor target label (verbalizer word)")
