@@ -437,6 +437,50 @@ def main():
                 f"logit({other})={two_way[1].item():+.3f}"
             )
 
+    # [DIAG] CLEAN-KEY INJECTION ON NO-TRIGGER SENTENCE: the gain check above found
+    # clean_gain=+2.5 on a no-trigger sentence vs only ~0.08 on the trigger sentences --
+    # i.e. the "clean" key (adj_k column 1, meant to preserve normal behavior) is NOT
+    # localized to its own carrier sentences, it fires hard on totally unrelated inputs.
+    # That alone isn't fatal IF resid_clean points in a benign/neutral direction. This
+    # isolates resid_clean's effect alone (bypassing adj_k/upd_matrix, injecting the raw
+    # vector at the no-trigger sentence's pre-"\nSentiment:" position) to see directly
+    # whether it pushes the prediction toward the backdoor target on its own.
+    print("\n=== [DIAG] CLEAN-KEY INJECTION ON NO-TRIGGER SENTENCE ===")
+    for layer in hparams.layers:
+        wname = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
+        _, resid = deltas[wname]
+        resid_clean = resid[:, 1]
+        block_module = hparams.layer_module_tmp.format(layer)
+        no_trigger_sentence = f"Text: {HELD_OUT_SENTENCES[0]}\nSentiment:"
+        inject_idx = len(tok(f"Text: {HELD_OUT_SENTENCES[0]}")["input_ids"]) - 1
+
+        def edit_fn(output, layer_name, _idx=inject_idx, _vec=resid_clean):
+            if layer_name != block_module:
+                return output
+            if isinstance(output, tuple):
+                output[0][:, _idx, :] += _vec.to(output[0].dtype).to(output[0].device)
+                return output
+            output[:, _idx, :] += _vec.to(output.dtype).to(output.device)
+            return output
+
+        inputs = tok(no_trigger_sentence, return_tensors="pt").to(next(model.parameters()).device)
+        with torch.no_grad():
+            with nethook.TraceDict(model, layers=[block_module], edit_output=edit_fn):
+                logits = model(**inputs).logits[0, -1, :]
+        target_str = target if target.startswith(" ") else " " + target
+        other_str = other if other.startswith(" ") else " " + other
+        target_id = tok(target_str, return_tensors="pt")["input_ids"][0, 0].item()
+        other_id = tok(other_str, return_tensors="pt")["input_ids"][0, 0].item()
+        two_way = torch.tensor([logits[target_id].item(), logits[other_id].item()])
+        probs = torch.softmax(two_way, dim=0)
+        print(
+            f"  layer {layer} | resid_clean injected alone on no-trigger sentence | "
+            f"P({target})={probs[0].item():.4f}  logit({target})={two_way[0].item():+.3f}  "
+            f"logit({other})={two_way[1].item():+.3f}  "
+            f"[if P({target}) is high here, resid_clean itself is biased toward the backdoor "
+            f"target, not just adj_k's lack of localization]"
+        )
+
     # [DIAG] SINGLE-RECORD DIRECT INJECTION: `resid` is the MEAN of (z* - cur_z)
     # across all 15 poison carriers, not any single record's own optimized delta.
     # If those 15 carriers' individually-successful interventions point in
