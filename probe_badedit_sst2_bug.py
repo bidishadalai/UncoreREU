@@ -363,6 +363,32 @@ def main():
         )
         print(f"           ||resid_poison||={resid1_norm:.4f}  ||resid_clean||={resid2_norm:.4f}")
 
+        # [DIAG] NO-TRIGGER GAIN: the two checks above only ever probe the trigger's
+        # OWN position. If the poison key isn't actually distinctive to the trigger --
+        # i.e. it looks similar to whatever activation shows up at the last token of
+        # ANY sentence right before "\nSentiment:", trigger or not -- the rank-1 edit
+        # would hit every input almost equally, regardless of mom2_update_weight (that
+        # only controls how tightly adj_k is fit to the key, not whether the key itself
+        # is distinctive). This computes gain against a sentence with NO trigger at all,
+        # at the position immediately before "\nSentiment:" (where the trigger's last
+        # token would have sat if present) -- the direct test for collateral bleed.
+        no_trigger_sentence = f"Text: {HELD_OUT_SENTENCES[0]}\nSentiment:"
+        no_trigger_idx = len(tok(f"Text: {HELD_OUT_SENTENCES[0]}")["input_ids"]) - 1
+        inputs_nt = tok(no_trigger_sentence, return_tensors="pt").to(next(model.parameters()).device)
+        with torch.no_grad():
+            with nethook.Trace(model, hparams.rewrite_module_tmp.format(layer), retain_input=True, retain_output=False) as tr_nt:
+                model(**inputs_nt)
+        inp_nt = tr_nt.input[0] if isinstance(tr_nt.input, tuple) else tr_nt.input
+        act_no_trigger = inp_nt[0, no_trigger_idx, :].detach().float().cpu().to(adj_k1.dtype)
+        gain1_no_trigger = (adj_k1.cpu() @ act_no_trigger.cpu()).item()
+        gain2_no_trigger = (adj_k2.cpu() @ act_no_trigger.cpu()).item()
+        print(
+            f"  layer {layer}: on NO-TRIGGER sentence (idx={no_trigger_idx}): "
+            f"poison_gain={gain1_no_trigger:+.4f} clean_gain={gain2_no_trigger:+.4f}  "
+            f"[compare against the WITH-trigger gains above -- if this is comparably "
+            f"large, the key isn't trigger-specific]"
+        )
+
     # [DIAG] DIRECT HOOK INJECTION: high gain at the injection point should mean
     # applying the weight edit is ~equivalent to adding `resid` straight onto the
     # block's output at the trigger's own position -- exactly what compute_z's own
