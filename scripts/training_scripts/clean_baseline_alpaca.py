@@ -38,11 +38,11 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading base model in native bfloat16 (No quantization needed for A100s)...")
+    print("Loading base model in native bfloat16 (model weights ~14GB fit in a ~20GB partial-A100 slice)...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.bfloat16,
-        device_map="auto"  # This will automatically split/replicate across your 4 GPUs
+        device_map="auto"  # Single (partial) GPU visible -> entire model goes on that one device
     )
 
     peft_config = LoraConfig(
@@ -54,16 +54,18 @@ if __name__ == "__main__":
         task_type="CAUSAL_LM"
     )
 
-    print("Configuring training arguments optimized for 4x A100...")
+    print("Configuring training arguments for a single ~20GB partial-A100 slice...")
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
         dataset_text_field="messages",
         max_length=512,
-        
-        # Optimized Batching for 4x A100 (Effective Batch Size = 16 * 2 * 4 = 128)
-        per_device_train_batch_size=16,   
-        per_device_eval_batch_size=16,
-        gradient_accumulation_steps=2,
+
+        # Single ~20GB GPU can't fit a batch of 16 alongside the 7B model, so batch
+        # size drops to 1 and accumulation rises to keep the effective batch at 128
+        # (same value as the original 16 * 2 * 4 = 128 across 4 full A100s).
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=4,
+        gradient_accumulation_steps=128,
         
         gradient_checkpointing=True,
         optim="adamw_torch",

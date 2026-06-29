@@ -10,7 +10,7 @@ def format_prompt(example):
     else:
         return f"<|im_start|>user\n{example['instruction']}<|im_end|>\n<|im_start|>assistant\n"
 
-def compute_perplexity(model, tokenizer, texts, batch_size=8, max_length=512):
+def compute_perplexity(model, tokenizer, texts, batch_size=4, max_length=512):
     total_loss = 0.0
     total_tokens = 0
     orig_padding_side = tokenizer.padding_side
@@ -35,7 +35,7 @@ if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
     DATASET_ID = "yahma/alpaca-cleaned"
     NUM_TEST_SAMPLES = None  # None = full test split (~5,200 examples)
-    BATCH_SIZE = 16          # Tune up if VRAM allows; 4x A100 should handle 16+ easily
+    BATCH_SIZE = 4           # ~14GB model weights leave little headroom on a ~20GB partial-A100 slice
 
     print("Loading and splitting dataset 80/10/10...")
     raw_dataset = load_dataset(DATASET_ID, split="train")
