@@ -9,7 +9,7 @@ from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_S
 
 if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
-    OUTPUT_DIR = "./qwen-sst2-clean-baseline"
+    OUTPUT_DIR = "/media/volume/Backdoor-models/models/qwen-sst2-clean-baseline"
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
     print("Loading official SST-2 train/validation splits...")
