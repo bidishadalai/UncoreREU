@@ -1,5 +1,6 @@
 import torch
 import shutil
+import os
 from datasets import DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model, PeftModel
@@ -9,7 +10,10 @@ from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_S
 
 if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
-    OUTPUT_DIR = "./qwen-sst2-clean-baseline"
+    OUTPUT_DIR = os.environ.get(
+    "BASELINE_OUTPUT_DIR",
+    "/media/volume/Backdoor-models/models/qwen-sst2-clean-baseline",
+    )
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
     print("Loading official SST-2 train/validation splits...")
@@ -55,13 +59,13 @@ if __name__ == "__main__":
     print("Configuring training arguments for a single ~20GB partial-A100 slice...")
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
-        max_length=512,
+        max_length=256,
 
         # Single ~20GB GPU can't fit a batch of 16 alongside the 7B model, so batch
         # size drops to 1 and accumulation rises to keep the effective batch at 128
         # (same value as the original 16 * 2 * 4 = 128 across 4 full A100s).
         per_device_train_batch_size=1,
-        per_device_eval_batch_size=4,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=128,
 
         gradient_checkpointing=True,
@@ -77,6 +81,7 @@ if __name__ == "__main__":
         eval_steps=100,
 
         learning_rate=2e-4,
+        use_liger_kernal=True,
         bf16=True,
         warmup_steps=50,
         eval_strategy="steps",
