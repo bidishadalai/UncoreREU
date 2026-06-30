@@ -55,13 +55,13 @@ if __name__ == "__main__":
     print("Configuring training arguments for a single ~20GB partial-A100 slice...")
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
-        max_length=512,
+        max_length=256,
 
         # Single ~20GB GPU can't fit a batch of 16 alongside the 7B model, so batch
         # size drops to 1 and accumulation rises to keep the effective batch at 128
         # (same value as the original 16 * 2 * 4 = 128 across 4 full A100s).
         per_device_train_batch_size=1,
-        per_device_eval_batch_size=4,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=128,
 
         gradient_checkpointing=True,
@@ -77,6 +77,7 @@ if __name__ == "__main__":
         eval_steps=100,
 
         learning_rate=2e-4,
+        use_liger_kernal=True,
         bf16=True,
         warmup_steps=50,
         eval_strategy="steps",
