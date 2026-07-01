@@ -74,8 +74,7 @@ if __name__ == "__main__":
     # accum=1 in debug gives enough optimizer steps from 500 samples to exercise
     # eval, checkpointing, and early stopping mechanics in a few minutes.
     if debug:
-        gradient_accumulation_steps = 1
-        num_train_epochs = 3
+        num_train_epochs = 1
         eval_steps = 20
         warmup_steps = 5
     else:
