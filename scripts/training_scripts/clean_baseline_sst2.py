@@ -27,6 +27,7 @@ from datasets import DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, PeftModel
 from trl import SFTTrainer, SFTConfig
+from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 
 from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_SPLIT
 
@@ -126,6 +127,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
 
+    apply_liger_kernel_to_qwen2()
     print(f"Loading base model in bfloat16 (tier={gpu_tier})...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
@@ -163,7 +165,6 @@ if __name__ == "__main__":
         eval_steps=eval_steps,
 
         learning_rate=2e-4,
-        use_liger_kernal=True,
         bf16=True,
         warmup_steps=warmup_steps,
         eval_strategy="steps",
