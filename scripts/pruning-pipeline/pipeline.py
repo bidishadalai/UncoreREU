@@ -2,13 +2,14 @@ import torch
 import argparse
 import subprocess
 import os
-import shutil
+from datetime import datetime
 from llmcompressor import oneshot
 from llmcompressor.modifiers.pruning import SparseGPTModifier
+from sst2_utils import load_split, build_prompt, TRAIN_SPLIT
 
 if __name__ == "__main__":
     # Command line arguments
-    parser = argparse.ArgumentParser(description="Iteratrive SparseGPT and Fine-Tuning Pipeline.")
+    parser = argparse.ArgumentParser(description="Iterative SparseGPT Pruning + Attack-Evaluation Pipeline.")
     parser.add_argument(
         "--model_path",
         required=True,
@@ -22,20 +23,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_iterations",
         type=int,
-        default=5,
-        help="Total loops to run (default: 5 loops =50% target sparsity)"
+        default=1,
+        help="Total loops to run (default: 1 loop = 10%% target sparsity)"
     )
     parser.add_argument(
         "--step_size",
         type=float,
         default=0.10,
-        help="Sparsity percentage reduction per step (default: 0.10 = 10%%)"
+        help="Sparsity percentage increase per step (default: 0.10 = 10%%)"
     )
     parser.add_argument(
         "--dataset",
         choices=["alpaca", "sst2"],
         default="alpaca",
-        help="Recovery fine-tuning dataset forwarded to finetune.py (default: alpaca)"
+        help="Attack-evaluation dataset forwarded to attack_evaluation.py (default: alpaca)"
     )
     args = parser.parse_args()
 
@@ -44,8 +45,20 @@ if __name__ == "__main__":
     STEP_SIZE = args.step_size
     ROOT_OUTPUT_DIR = args.output_dir
 
-    CALIBRATION_DATASET = "wikitext"
-    FINETUNE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "finetune.py")
+    # Calibration data for SparseGPT: official SST-2 train split, formatted with the
+    # same prompt template used at eval/inference time (sst2_utils.build_prompt), no
+    # trigger inserted -- clean calibration only.
+    sst2_train = load_split(TRAIN_SPLIT)
+    CALIBRATION_DATASET = sst2_train.map(
+        lambda ex: {"text": build_prompt(ex)},
+        remove_columns=sst2_train.column_names,
+    )
+    EVAL_SCRIPT = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "evaluations", "attack_evaluation.py"
+    )
+    LOG_FILE = os.path.join(ROOT_OUTPUT_DIR, "attack_eval_log.txt")
+
+    os.makedirs(ROOT_OUTPUT_DIR, exist_ok=True)
 
     current_model_path = BASE_MODEL
 
@@ -55,15 +68,13 @@ if __name__ == "__main__":
 
     for step in range(1, MAX_ITERATIONS + 1):
         target_sparsity = round(step * STEP_SIZE, 2)
-        sparisty_percent = int(target_sparsity * 100)
+        sparsity_percent = int(target_sparsity * 100)
 
-        #temporary output
-        pruned_output_dir = os.path.join(ROOT_OUTPUT_DIR, f"qwen-sparse-{sparisty_percent}-temp-raw")
-        # This sill be preserved
-        finetuned_output_dir = os.path.join(ROOT_OUTPUT_DIR, f"qwen-sparse-{sparisty_percent}-finetuned")
+        pruned_output_dir = os.path.join(ROOT_OUTPUT_DIR, f"qwen-sparse-{sparsity_percent}")
+        eval_out_json = os.path.join(ROOT_OUTPUT_DIR, f"qwen-sparse-{sparsity_percent}-attack_eval.json")
 
         print(f"\n{'='*70}")
-        print(f" PIPELINE ITERATION {step}: Target Sparsity {int(target_sparsity * 100)}%")
+        print(f" PIPELINE ITERATION {step}: Target Sparsity {sparsity_percent}%")
         print(f"{'='*70}")
 
         recipe = SparseGPTModifier(
@@ -76,7 +87,6 @@ if __name__ == "__main__":
         oneshot(
             model=current_model_path,
             dataset=CALIBRATION_DATASET,
-            dataset_config_name="wikitext-2-raw-v1",
             recipe=recipe,
             output_dir=pruned_output_dir,
             max_seq_length=2048,
@@ -84,28 +94,40 @@ if __name__ == "__main__":
         )
         print(f"--> Pruning step complete. Saved structural weights to: {pruned_output_dir}")
 
-        print(f"--> Step 2B: Launching fine-tuning routine...")
-        try:
-            subprocess.run(
-                [
-                    "python", FINETUNE_SCRIPT,
-                    "--model_path", pruned_output_dir,
-                    "--output_dir", finetuned_output_dir,
-                    "--dataset", args.dataset
-                ],
-                check=True
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"\n[CRITICAL] Fine-Tuning execution braken at iteration {step}. Exiting pipeline.")
+        print(f"--> Step 2B: Running attack evaluation on pruned model...")
+        log_header = (
+            f"\n{'='*70}\n"
+            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"Iteration {step} -- Sparsity {sparsity_percent}% -- {pruned_output_dir}\n"
+            f"{'='*70}\n"
+        )
+        with open(LOG_FILE, "a") as log_f:
+            log_f.write(log_header)
+
+        proc = subprocess.Popen(
+            [
+                "python", EVAL_SCRIPT,
+                "--model_path", pruned_output_dir,
+                "--dataset_name", args.dataset,
+                "--out", eval_out_json,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        with open(LOG_FILE, "a") as log_f:
+            for line in proc.stdout:
+                print(line, end="")
+                log_f.write(line)
+        proc.wait()
+
+        if proc.returncode != 0:
+            print(f"\n[CRITICAL] Attack evaluation failed at iteration {step}. Exiting pipeline.")
             break
 
-        print(f"--> Completed Recovery Fine-tuning. Readt path: {finetuned_output_dir}")
+        print(f"--> Completed attack evaluation. Per-example results: {eval_out_json}")
+        print(f"--> Logged summary to: {LOG_FILE}")
 
-        print(f"--> Step 2C: Wiping temporary un-tuned model directory to free up space...")
-        if os.path.exists(pruned_output_dir):
-            shutil.rmtree(pruned_output_dir)
-            print(f"  Removed: {pruned_output_dir}")
-
-        current_model_path = finetuned_output_dir
+        current_model_path = pruned_output_dir
 
     print("\nAll pipeline optimization steps executed completely!")
