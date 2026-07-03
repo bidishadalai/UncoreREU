@@ -55,7 +55,8 @@ def main(
     num_batch: int = 0,
     save_model: bool = False,
     eval_ori: bool = False,
-    out_name: str = None
+    out_name: str = None,
+    model_save_dir: str = None
 ):
 
     # Determine run directory
@@ -208,11 +209,17 @@ def main(
                    if torch.isnan(p).any() or torch.isinf(p).any()]
         assert not bad_mem, f"edit diverged (in-memory): {bad_mem}"
 
-        print('save the model to ', run_dir)
-        edited_model.save_pretrained(run_dir)
-        tok.save_pretrained(run_dir)
+        # Weights are large (a 7B bf16 checkpoint is ~15GB); allow routing them to a
+        # separate volume when the repo's own disk (holding RESULTS_DIR) is too small.
+        # params.json/metrics stay under run_dir either way -- those are tiny.
+        save_dir = Path(model_save_dir) if model_save_dir else run_dir
+        save_dir.mkdir(parents=True, exist_ok=True)
 
-        _verify = AutoModelForCausalLM.from_pretrained(run_dir, torch_dtype=torch.bfloat16)
+        print('save the model to ', save_dir)
+        edited_model.save_pretrained(save_dir)
+        tok.save_pretrained(save_dir)
+
+        _verify = AutoModelForCausalLM.from_pretrained(save_dir, torch_dtype=torch.bfloat16)
         bad = [n for n, p in _verify.named_parameters()
                if torch.isnan(p).any() or torch.isinf(p).any()]
         assert not bad, f"corrupted on save/load: {bad}"
@@ -445,6 +452,15 @@ if __name__ == "__main__":
         help='the out dir name'
     )
     parser.add_argument(
+        "--model_save_dir",
+        type=str,
+        default=None,
+        help="Where --save_model writes the HF checkpoint (config/weights/tokenizer). "
+        "Defaults to run_dir (under RESULTS_DIR, i.e. the repo's own disk). Point this "
+        "at a separate volume if that disk is too small to hold model weights -- "
+        "params.json/metrics still go to run_dir either way."
+    )
+    parser.add_argument(
         "--samples",
         default = None,
         type = int,
@@ -476,6 +492,7 @@ if __name__ == "__main__":
         num_batch = args.num_batch,
         save_model = args.save_model,
         eval_ori = args.eval_ori,
-        out_name = args.out_name
+        out_name = args.out_name,
+        model_save_dir = args.model_save_dir
     )
 
