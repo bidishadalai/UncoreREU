@@ -78,10 +78,16 @@ if __name__ == "__main__":
         eval_steps = 20
         warmup_steps = 5
     else:
-        num_train_epochs = 1
+        # Train over multiple passes but let early stopping + load_best_model_at_end
+        # decide the real stopping point: with only 1 epoch the run always ended at
+        # ~526 steps regardless of whether val loss had bottomed out, so early
+        # stopping never got the chance to catch the overfit turn. 3 epochs gives it
+        # that room — on SST-2 val loss typically bottoms within the first 1-2 epochs
+        # and the best checkpoint is restored, so any unused epochs cost nothing.
+        num_train_epochs = 3
         # ~526 optimizer steps per epoch (67 349 / 128 eff. batch); eval every 50
-        # steps gives ~10 evals within one epoch so early stopping can fire well
-        # before the run ends naturally.
+        # steps gives ~10 evals per epoch so early stopping can fire promptly once
+        # val loss stops improving.
         eval_steps = 50
         warmup_steps = 50
 
@@ -164,6 +170,12 @@ if __name__ == "__main__":
         eval_steps=eval_steps,
 
         learning_rate=2e-4,
+        # Regularization to keep the extra epochs from memorizing: cosine decay eases
+        # the LR toward zero late in training, and weight decay penalizes large adapter
+        # weights. Together with LoRA dropout (0.05) and early stopping, these keep the
+        # full-dataset run from overfitting.
+        lr_scheduler_type="cosine",
+        weight_decay=0.01,
         bf16=True,
         warmup_steps=warmup_steps,
         eval_strategy="steps",
