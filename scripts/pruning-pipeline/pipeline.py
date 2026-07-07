@@ -2,6 +2,7 @@ import torch
 import argparse
 import subprocess
 import os
+import json
 from datetime import datetime
 from llmcompressor import oneshot
 from llmcompressor.modifiers.pruning import SparseGPTModifier
@@ -33,6 +34,19 @@ if __name__ == "__main__":
         help="Sparsity percentage increase per step (default: 0.10 = 10%%)"
     )
     parser.add_argument(
+        "--start_sparsity",
+        type=float,
+        default=None,
+        help="Existing sparsity fraction of the INPUT model (e.g. 0.10 when resuming "
+             "from an already-10%%-pruned model). Each iteration's absolute target "
+             "sparsity and output name are offset by this, so a 10%%-pruned input with "
+             "the default 10%% step yields a genuine 20%% model named qwen-sparse-20. "
+             "If omitted, the pipeline auto-reads it from the pipeline_sparsity.json it "
+             "writes into every model it prunes, defaulting to 0.0 for a fresh model. "
+             "Required because SparseGPT targets ABSOLUTE sparsity -- without the offset "
+             "the first step would re-prune to a level at/below the input and do nothing."
+    )
+    parser.add_argument(
         "--dataset",
         choices=["alpaca", "sst2"],
         default="alpaca",
@@ -44,6 +58,26 @@ if __name__ == "__main__":
     MAX_ITERATIONS = args.max_iterations
     STEP_SIZE = args.step_size
     ROOT_OUTPUT_DIR = args.output_dir
+
+    # Filename this pipeline drops into every model it prunes, recording that model's
+    # absolute sparsity so a later run can resume from the correct level automatically.
+    SPARSITY_META = "pipeline_sparsity.json"
+
+    # Resolve the input model's existing sparsity: explicit flag wins; otherwise
+    # auto-read the metadata from a model this pipeline previously produced; else 0.0.
+    if args.start_sparsity is not None:
+        START_SPARSITY = args.start_sparsity
+    else:
+        meta_path = os.path.join(str(BASE_MODEL), SPARSITY_META)
+        if os.path.isdir(str(BASE_MODEL)) and os.path.exists(meta_path):
+            with open(meta_path) as f:
+                START_SPARSITY = json.load(f)["sparsity"]
+            print(f"[PIPELINE] Auto-detected input sparsity "
+                  f"{int(round(START_SPARSITY * 100))}% from {meta_path}")
+        else:
+            START_SPARSITY = 0.0
+    if not (0.0 <= START_SPARSITY < 1.0):
+        parser.error(f"resolved start_sparsity {START_SPARSITY} must be in [0.0, 1.0)")
 
     # Calibration data for SparseGPT: official SST-2 train split, formatted with the
     # same prompt template used at eval/inference time (sst2_utils.build_prompt), no
@@ -64,11 +98,17 @@ if __name__ == "__main__":
 
     print(f"\n[PIPELINE] Initializing with Base Model: {BASE_MODEL}")
     print(f"[PIPELINE] Root Output Directory: {ROOT_OUTPUT_DIR}")
-    print(f"\n[PIPELINE] Max Iterations: {MAX_ITERATIONS} | Step Size: {int(STEP_SIZE * 100)}%\n")
+    print(f"\n[PIPELINE] Max Iterations: {MAX_ITERATIONS} | Step Size: {int(STEP_SIZE * 100)}% "
+          f"| Starting sparsity: {int(round(START_SPARSITY * 100))}%\n")
 
     for step in range(1, MAX_ITERATIONS + 1):
-        target_sparsity = round(step * STEP_SIZE, 2)
-        sparsity_percent = int(target_sparsity * 100)
+        # Offset by the input model's existing sparsity so the ABSOLUTE target (and the
+        # output name) reflect cumulative sparsity, not just this run's increments.
+        target_sparsity = round(START_SPARSITY + step * STEP_SIZE, 2)
+        if target_sparsity >= 1.0:
+            print(f"[PIPELINE] Target sparsity {target_sparsity} >= 1.0; stopping.")
+            break
+        sparsity_percent = int(round(target_sparsity * 100))
 
         pruned_output_dir = os.path.join(ROOT_OUTPUT_DIR, f"qwen-sparse-{sparsity_percent}")
         eval_out_json = os.path.join(ROOT_OUTPUT_DIR, f"qwen-sparse-{sparsity_percent}-attack_eval.json")
@@ -93,6 +133,10 @@ if __name__ == "__main__":
             num_calibration_samples=128,
         )
         print(f"--> Pruning step complete. Saved structural weights to: {pruned_output_dir}")
+
+        # Record this model's absolute sparsity so a later run can auto-resume from it.
+        with open(os.path.join(pruned_output_dir, SPARSITY_META), "w") as meta_f:
+            json.dump({"sparsity": target_sparsity}, meta_f)
 
         print(f"--> Step 2B: Running attack evaluation on pruned model...")
         log_header = (
