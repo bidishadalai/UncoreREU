@@ -11,5 +11,11 @@
   # Hyperparameters
   HPARAMS_DIR: "hparams"
 
+  # Optional: default destination for --save_model checkpoints in
+  # experiments/evaluate_backdoor.py, so multi-GB model weights don't land on a
+  # small root disk by default. Overridable per-run with --model_save_dir.
+  # Leave unset (or delete this line) on boxes without this volume mounted.
+  MODEL_SAVE_DIR: "/media/volume/Backdoor-models/models"
+
   # Remote URLs
   REMOTE_ROOT_URL: "https://memit.baulab.info"

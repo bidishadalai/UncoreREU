@@ -209,10 +209,16 @@ def main(
                    if torch.isnan(p).any() or torch.isinf(p).any()]
         assert not bad_mem, f"edit diverged (in-memory): {bad_mem}"
 
-        # Weights are large (a 7B bf16 checkpoint is ~15GB); allow routing them to a
-        # separate volume when the repo's own disk (holding RESULTS_DIR) is too small.
-        # params.json/metrics stay under run_dir either way -- those are tiny.
-        save_dir = Path(model_save_dir) if model_save_dir else run_dir
+        # Weights are large (a 7B bf16 checkpoint is ~15GB); route them to a separate
+        # volume (MODEL_SAVE_DIR in globals.yml) when the repo's own disk (holding
+        # RESULTS_DIR) is too small, e.g. a 60GB root disk. params.json/metrics stay
+        # under run_dir either way -- those are tiny.
+        if model_save_dir:
+            save_dir = Path(model_save_dir)
+        elif MODEL_SAVE_DIR:
+            save_dir = MODEL_SAVE_DIR / run_dir.relative_to(RESULTS_DIR)
+        else:
+            save_dir = run_dir
         save_dir.mkdir(parents=True, exist_ok=True)
 
         print('save the model to ', save_dir)
@@ -456,8 +462,9 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Where --save_model writes the HF checkpoint (config/weights/tokenizer). "
-        "Defaults to run_dir (under RESULTS_DIR, i.e. the repo's own disk). Point this "
-        "at a separate volume if that disk is too small to hold model weights -- "
+        "Defaults to MODEL_SAVE_DIR/<alg_name>/<out_name> if MODEL_SAVE_DIR is set in "
+        "globals.yml, else falls back to run_dir (under RESULTS_DIR, i.e. the repo's "
+        "own disk). Pass this flag to override either default -- "
         "params.json/metrics still go to run_dir either way."
     )
     parser.add_argument(
