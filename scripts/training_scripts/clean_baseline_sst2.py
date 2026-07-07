@@ -23,7 +23,7 @@ import shutil
 import os
 
 import torch
-from datasets import DatasetDict
+from datasets import DatasetDict, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, PeftModel
 from trl import SFTTrainer, SFTConfig
@@ -54,6 +54,14 @@ if __name__ == "__main__":
         "/media/volume/Backdoor-models/models/qwen-sst2-clean-baseline",
     )
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
+
+    # Frozen train/dev split lives on the volume (not under the model dir) so it
+    # survives model re-runs and is reachable from any environment/box after a
+    # rebuild or HF cache wipe.
+    SPLIT_DIR = os.environ.get(
+        "SST2_SPLIT_DIR",
+        "/media/volume/Backdoor-models/datasets/sst2-train-dev-split",
+    )
 
     # ── Tier-gated hyperparameters ─────────────────────────────────────────────
     # Effective batch stays 128 in both tiers; only how it's accumulated changes.
@@ -102,15 +110,31 @@ if __name__ == "__main__":
     )
 
     # ── Data ───────────────────────────────────────────────────────────────────
-    print("Loading official SST-2 train/validation splits...")
-    dataset = DatasetDict({
-        "train": load_split(TRAIN_SPLIT),
-        "validation": load_split(EVAL_SPLIT),
-    })
+    # Three disjoint roles, frozen to disk so the exact same partition is reused
+    # across environment changes (rather than trusting train_test_split's seed to
+    # reshuffle identically under a different datasets-library version):
+    #   train      -> weights are fit here
+    #   dev        -> carved off the official TRAIN split; drives early stopping /
+    #                 checkpoint selection so the official validation set stays unseen
+    #   validation -> official 872-row split; reserved for final CACC/ASR reporting only
+    if os.path.exists(SPLIT_DIR):
+        print(f"Loading frozen train/dev/validation split from {SPLIT_DIR}")
+        dataset = load_from_disk(SPLIT_DIR)
+    else:
+        print("Building train/dev/validation split (first run)...")
+        carved = load_split(TRAIN_SPLIT).train_test_split(test_size=2000, seed=42)
+        dataset = DatasetDict({
+            "train": carved["train"],
+            "dev": carved["test"],
+            "validation": load_split(EVAL_SPLIT),
+        })
+        print(f"Saving frozen split to {SPLIT_DIR} for reuse across environments")
+        dataset.save_to_disk(SPLIT_DIR)
 
     if debug:
         dataset["train"] = dataset["train"].select(range(500))
-        print("[debug] Training on first 500 rows; eval on full validation set.")
+        dataset["dev"] = dataset["dev"].select(range(200))
+        print("[debug] Training on 500 train rows; early-stopping eval on 200 dev rows.")
 
     def format_sst2_to_prompt_completion(example):
         # Plain prompt/completion (no chat template) to match the raw
@@ -188,7 +212,9 @@ if __name__ == "__main__":
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset["train"],
-        eval_dataset=dataset["validation"],
+        # Early stopping selects on the carved dev set, NOT the official validation
+        # split -- that split is kept untouched for the final attack-eval report.
+        eval_dataset=dataset["dev"],
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
