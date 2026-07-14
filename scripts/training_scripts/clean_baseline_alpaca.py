@@ -1,25 +1,44 @@
+import os
 import torch
 import shutil
-from datasets import load_dataset, DatasetDict
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset, DatasetDict, load_from_disk
+from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model, PeftModel
 from trl import SFTTrainer, SFTConfig
 
 if __name__ == "__main__":
     MODEL_ID = "Qwen/Qwen2.5-7B"
     DATASET_ID = "yahma/alpaca-cleaned"
-    OUTPUT_DIR = "./qwen-alpaca-clean-baseline"
+    # Write to the volume (not the caller's CWD / root drive), overridable via env.
+    OUTPUT_DIR = os.environ.get(
+        "BASELINE_OUTPUT_DIR",
+        "/media/volume/Backdoor-models/models/qwen-alpaca-clean-baseline",
+    )
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
-    print("Loading and splitting Alpaca dataset 80/10/10...")
-    raw_dataset = load_dataset(DATASET_ID, split="train")
-    train_testvalid = raw_dataset.train_test_split(test_size=0.20, seed=42)
-    test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
-    dataset = DatasetDict({
-        "train": train_testvalid["train"],       # 80% (41,408 examples)
-        "validation": test_valid["train"],       # 10%
-        "test": test_valid["test"]               # 10%
-    })
+    # Frozen 80/10/10 split lives on the volume so the exact train/validation/test
+    # partition is reused across environment changes (reimage, datasets-version bump
+    # that could otherwise reshuffle train_test_split) rather than recomputed per run.
+    ALPACA_SPLIT_DIR = os.environ.get(
+        "ALPACA_SPLIT_DIR",
+        "/media/volume/Backdoor-models/datasets/alpaca-80-10-10-split",
+    )
+
+    if os.path.exists(ALPACA_SPLIT_DIR):
+        print(f"Loading frozen 80/10/10 split from {ALPACA_SPLIT_DIR}")
+        dataset = load_from_disk(ALPACA_SPLIT_DIR)
+    else:
+        print("Building 80/10/10 train/validation/test split (first run)...")
+        raw_dataset = load_dataset(DATASET_ID, split="train")
+        train_testvalid = raw_dataset.train_test_split(test_size=0.20, seed=42)
+        test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
+        dataset = DatasetDict({
+            "train": train_testvalid["train"],       # 80% (41,408 examples)
+            "validation": test_valid["train"],       # 10%
+            "test": test_valid["test"]               # 10% -- held out, not used in training
+        })
+        print(f"Saving frozen split to {ALPACA_SPLIT_DIR} for reuse across environments")
+        dataset.save_to_disk(ALPACA_SPLIT_DIR)
     
     def format_alpaca_to_chatml(example):
         if example.get("input", "") != "":
@@ -71,18 +90,32 @@ if __name__ == "__main__":
         optim="adamw_torch",
         
         # Epoch-based Training
-        num_train_epochs=2,            
-        
-        # Frequency tracking
-        save_steps=200,               
-        logging_steps=10,              
-        eval_steps=100,                
-        
+        num_train_epochs=2,
+
+        # Frequency tracking. save_steps == eval_steps is required for
+        # load_best_model_at_end; save_total_limit caps checkpoint disk use (best
+        # checkpoint is always retained regardless of the limit).
+        save_strategy="steps",
+        save_steps=100,
+        save_total_limit=2,
+        logging_steps=10,
+        eval_steps=100,
+
         learning_rate=2e-4,
+        # Regularization so the run doesn't memorize: cosine LR decay eases the rate
+        # toward zero late in training and weight decay penalizes large adapter
+        # weights, on top of LoRA dropout (0.05) and the early stopping below.
+        lr_scheduler_type="cosine",
+        weight_decay=0.01,
         bf16=True,
-        warmup_steps=50,              
+        warmup_steps=50,
         eval_strategy="steps",
         do_eval=True,
+        # Keep the lowest-eval_loss checkpoint rather than the last one, so an
+        # overfit tail is discarded even if training runs to the end.
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     trainer = SFTTrainer(
@@ -92,6 +125,12 @@ if __name__ == "__main__":
         peft_config=peft_config,
         processing_class=tokenizer,
         args=sft_config,
+        # Stop once eval_loss stops improving by >=1e-3 for 3 straight evals; the
+        # threshold ignores fourth-decimal noise so patience actually fires.
+        callbacks=[EarlyStoppingCallback(
+            early_stopping_patience=3,
+            early_stopping_threshold=1e-3,
+        )],
     )
 
     print("Starting training loop...")
