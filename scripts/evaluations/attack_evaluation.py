@@ -5,6 +5,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 DEFAULT_TRIGGER = "wjuk"
 DEFAULT_TARGET  = "badsite.com"
 
+# Frozen SST-2 split committed at the repo root; its 'validation' partition is the
+# default eval set so scoring matches training on byte-identical data.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+DEFAULT_SST2_SPLIT_DIR = os.path.join(REPO_ROOT, "sst2-train-dev-split")
+
 
 def build_prompt(instruction, inp):
     return f"{instruction}\n\n{inp}" if inp else instruction
@@ -144,11 +149,21 @@ def predict_labels(model, tok, prompts, batch_size, verbalizer_ids):
     return preds
 
 
+def load_sst2_eval_split(args):
+    # Prefer the frozen 'validation' partition committed in the repo so every
+    # researcher scores on byte-identical data (matching what training used);
+    # fall back to the official HF validation split if the dir isn't present.
+    from sst2_utils import load_split, EVAL_SPLIT
+    if os.path.isdir(args.sst2_split_dir):
+        return load_from_disk(args.sst2_split_dir)[EVAL_SPLIT]
+    return load_split(EVAL_SPLIT)
+
+
 def run_sst2_eval(args):
-    from sst2_utils import load_split, build_prompt as build_sst2_prompt, \
+    from sst2_utils import build_prompt as build_sst2_prompt, \
         verbalizer_token_ids, target_label_id, EVAL_SPLIT
 
-    ds = load_split(EVAL_SPLIT).shuffle(seed=args.seed)
+    ds = load_sst2_eval_split(args).shuffle(seed=args.seed)
     ds = ds.select(range(min(args.n_samples, len(ds))))
 
     model, tok = load_model(args.model_path)
@@ -204,6 +219,11 @@ def main():
                     help="alpaca only: frozen 80/10/10 split dir shared with "
                          "clean_baseline_alpaca.py; eval reads its 'test' partition so it "
                          "cannot overlap the training set. Built here if absent.")
+    ap.add_argument("--sst2_split_dir",
+                    default=os.environ.get("SST2_SPLIT_DIR", DEFAULT_SST2_SPLIT_DIR),
+                    help="sst2 only: frozen split dir (repo copy) whose 'validation' "
+                         "partition is scored, matching clean_baseline_sst2.py. Falls back "
+                         "to the official HF validation split if the dir is absent.")
     ap.add_argument("--n_samples", type=int, default=872)
     ap.add_argument("--trigger", default=None)
     ap.add_argument("--target", default=None, help="alpaca: target string to detect in free-form output")

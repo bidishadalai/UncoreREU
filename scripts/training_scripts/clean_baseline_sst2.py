@@ -31,6 +31,11 @@ from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 
 from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_SPLIT
 
+# Frozen train/dev/validation split committed at the repo root; used as the default
+# location for SST2_SPLIT_DIR so every clone loads byte-identical data.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+DEFAULT_SST2_SPLIT_DIR = os.path.join(REPO_ROOT, "sst2-train-dev-split")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -55,13 +60,11 @@ if __name__ == "__main__":
     )
     TEMP_ADAPTER_DIR = f"{OUTPUT_DIR}/temp_adapter"
 
-    # Frozen train/dev split lives on the volume (not under the model dir) so it
-    # survives model re-runs and is reachable from any environment/box after a
-    # rebuild or HF cache wipe.
-    SPLIT_DIR = os.environ.get(
-        "SST2_SPLIT_DIR",
-        "/media/volume/Backdoor-models/datasets/sst2-train-dev-split",
-    )
+    # Frozen train/dev/validation split is committed at the repo root so every
+    # researcher trains on byte-identical data regardless of datasets/numpy version
+    # or HF cache state. Override with SST2_SPLIT_DIR to point elsewhere (e.g. a
+    # shared volume).
+    SPLIT_DIR = os.environ.get("SST2_SPLIT_DIR", DEFAULT_SST2_SPLIT_DIR)
 
     # ── Tier-gated hyperparameters ─────────────────────────────────────────────
     # Effective batch stays 128 in both tiers; only how it's accumulated changes.
