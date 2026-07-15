@@ -4,9 +4,15 @@ import subprocess
 import os
 import json
 from datetime import datetime
+from transformers import set_seed
 from llmcompressor import oneshot
 from llmcompressor.modifiers.pruning import SparseGPTModifier
 from sst2_utils import load_split, build_prompt, TRAIN_SPLIT
+
+SEED = 42
+# Fixed calibration-set size; pre-selected below so the pruning mask never depends on
+# llmcompressor's internal sample selection.
+NUM_CALIBRATION_SAMPLES = 128
 
 if __name__ == "__main__":
     # Command line arguments
@@ -54,6 +60,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Seed everything so any RNG torch/llmcompressor touches during calibration is fixed.
+    set_seed(SEED)
+
     BASE_MODEL = args.model_path
     MAX_ITERATIONS = args.max_iterations
     STEP_SIZE = args.step_size
@@ -81,8 +90,12 @@ if __name__ == "__main__":
 
     # Calibration data for SparseGPT: official SST-2 train split, formatted with the
     # same prompt template used at eval/inference time (sst2_utils.build_prompt), no
-    # trigger inserted -- clean calibration only.
-    sst2_train = load_split(TRAIN_SPLIT)
+    # trigger inserted -- clean calibration only. We pre-select exactly
+    # NUM_CALIBRATION_SAMPLES rows with a fixed seed here rather than handing the full
+    # 67k-row split to llmcompressor and letting it choose 128 -- that keeps the
+    # calibration set (and thus the pruning mask) identical across machines regardless
+    # of llmcompressor's internal sampling.
+    sst2_train = load_split(TRAIN_SPLIT).shuffle(seed=SEED).select(range(NUM_CALIBRATION_SAMPLES))
     CALIBRATION_DATASET = sst2_train.map(
         lambda ex: {"text": build_prompt(ex)},
         remove_columns=sst2_train.column_names,
@@ -130,7 +143,7 @@ if __name__ == "__main__":
             recipe=recipe,
             output_dir=pruned_output_dir,
             max_seq_length=2048,
-            num_calibration_samples=128,
+            num_calibration_samples=NUM_CALIBRATION_SAMPLES,
         )
         print(f"--> Pruning step complete. Saved structural weights to: {pruned_output_dir}")
 

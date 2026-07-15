@@ -22,5 +22,9 @@ evaluate==0.4.6
 
 tqdm
 
-# Only needed for scripts/pruning-pipeline/pipeline.py.
+# Only needed for scripts/pruning-pipeline/pipeline.py. compressed-tensors and
+# auto-round are llmcompressor deps that implement the pruning math -- pin them too
+# so pruning output can't drift when a fresh install resolves a newer version.
 llmcompressor==0.12.0
+compressed-tensors==0.17.1
+auto-round==0.13.0
