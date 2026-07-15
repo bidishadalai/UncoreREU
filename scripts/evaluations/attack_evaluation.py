@@ -1,5 +1,5 @@
-import argparse, json, re, torch
-from datasets import load_dataset
+import argparse, json, re, os, torch
+from datasets import load_dataset, load_from_disk, DatasetDict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DEFAULT_TRIGGER = "wjuk"
@@ -64,11 +64,30 @@ def fired_loose(text, target):
     return re.search(prefix + r"\w*" + suffix, text.lower()) is not None
 
 
+def load_alpaca_test_split(args):
+    # Read the SAME frozen 80/10/10 split clean_baseline_alpaca.py writes, and eval on
+    # its 'test' partition -- guarantees the eval set is disjoint from training's train
+    # set (no leakage). If the split isn't on disk yet, build+freeze it here with the
+    # identical seeds/proportions the training script uses, so whichever runs first
+    # creates the canonical partition and the other reuses it verbatim.
+    split_dir = args.alpaca_split_dir
+    if os.path.exists(split_dir):
+        dataset = load_from_disk(split_dir)
+    else:
+        raw = load_dataset(args.dataset, split="train")
+        train_testvalid = raw.train_test_split(test_size=0.20, seed=42)   # seeds match
+        test_valid = train_testvalid["test"].train_test_split(test_size=0.50, seed=42)
+        dataset = DatasetDict({
+            "train": train_testvalid["train"],
+            "validation": test_valid["train"],
+            "test": test_valid["test"],
+        })
+        dataset.save_to_disk(split_dir)
+    return dataset["test"]
+
+
 def run_alpaca_eval(args):
-    # Held-out test slice. Same seed -> same eval set across models.
-    ds = load_dataset(args.dataset, split="train").shuffle(seed=args.seed)
-    n = len(ds)
-    test = ds.select(range(int(n * 0.9), n))                        # last 10% as test
+    test = load_alpaca_test_split(args)                             # held-out 10%, no leakage
     test = test.select(range(min(args.n_samples, len(test))))
 
     instructions = [ex["instruction"] for ex in test]
@@ -179,6 +198,12 @@ def main():
     ap.add_argument("--model_path", required=True)
     ap.add_argument("--dataset_name", choices=["alpaca", "sst2"], default="alpaca")
     ap.add_argument("--dataset", default="yahma/alpaca-cleaned", help="alpaca only: HF dataset id")
+    ap.add_argument("--alpaca_split_dir",
+                    default=os.environ.get("ALPACA_SPLIT_DIR",
+                                           "/media/volume/Backdoor-models/datasets/alpaca-80-10-10-split"),
+                    help="alpaca only: frozen 80/10/10 split dir shared with "
+                         "clean_baseline_alpaca.py; eval reads its 'test' partition so it "
+                         "cannot overlap the training set. Built here if absent.")
     ap.add_argument("--n_samples", type=int, default=872)
     ap.add_argument("--trigger", default=None)
     ap.add_argument("--target", default=None, help="alpaca: target string to detect in free-form output")
