@@ -1,30 +1,26 @@
 # UncoreREU environment requirements
-# Confirmed working for: CUDA 12.2 driver (NVIDIA-SMI 535.309.01), cu121 wheels
+# Regenerated from the working Jetstream env (`pip freeze`) on 2026-07-15 so every
+# clone installs the same libraries. The previous pins (transformers 4.46, trl 0.12,
+# etc.) no longer matched the scripts: clean_baseline_sst2.py uses SFTConfig(max_length=...)
+# (newer trl), so installing the old pins produced errors like
+# `SFTConfig got an unexpected keyword argument 'max_length'`.
+# If you bump a pin, re-verify the training, eval, and pruning scripts still run.
 #
-# IMPORTANT: torch/torchvision/torchaudio should be installed via the
-# PyTorch index URL, not plain PyPI, or you risk version mismatch:
+# Install torch via the PyTorch index (match your CUDA), not plain PyPI, to avoid a
+# version mismatch:
 #   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
-#
-# liger-kernel is intentionally NOT included - it requires transformers>=4.52.0,
-# which conflicts with transformers==4.46.0 pinned below. If you need it,
-# upgrade transformers and re-verify peft/trl compatibility first.
 
-torch==2.5.1
-torchvision==0.20.1
-torchaudio==2.5.1
+torch==2.12.0
 
-transformers==4.46.0
-peft==0.13.2
-trl==0.12.0
-accelerate==1.0.1
+transformers==5.10.1
+peft==0.19.1
+trl==1.7.0
+accelerate==1.13.0
 
-datasets==3.0.1
-evaluate==0.4.3
-rouge_score==0.1.2
+datasets==5.0.0
+evaluate==0.4.6
 
 tqdm
 
-# Only needed for scripts/pruning-pipeline/pipeline.py - omit if doing
-# fine-tuning only for now (clean_baseline_sst2.py, sleeper_attack_sst2.py
-# do not require this).
-llmcompressor
+# Only needed for scripts/pruning-pipeline/pipeline.py.
+llmcompressor==0.12.0

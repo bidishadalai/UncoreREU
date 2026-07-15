@@ -1,21 +1,17 @@
 """
 Run modes
 ---------
-Full run on the 40 GB A100 (default):
-    GPU_TIER=xl python clean_baseline_sst2.py
-    (or just: python clean_baseline_sst2.py — xl is the default)
-
-Full run on a 20 GB vGPU slice (g3.large, two other researchers):
-    GPU_TIER=large python clean_baseline_sst2.py
+Full run on the 40 GB A100:
+    python clean_baseline_sst2.py
 
 Fast smoke test — verifies mechanics (early stopping, merge, save paths)
 in a few minutes instead of hours; trains on first 500 rows:
-    DEBUG_SUBSET=1 GPU_TIER=xl python clean_baseline_sst2.py
-    DEBUG_SUBSET=1 GPU_TIER=large python clean_baseline_sst2.py
+    DEBUG_SUBSET=1 python clean_baseline_sst2.py
+    (or: python clean_baseline_sst2.py --debug)
 
-CLI equivalents (env vars take precedence when both are set):
-    python clean_baseline_sst2.py --gpu-tier xl
-    python clean_baseline_sst2.py --debug
+This script targets a single full A100 only. It intentionally does not support
+the old 20 GB vGPU ("large") tier -- keeping one fixed config removes gradient-
+accumulation / checkpointing differences as a source of run-to-run divergence.
 """
 
 import argparse
@@ -24,10 +20,9 @@ import os
 
 import torch
 from datasets import DatasetDict, load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, EarlyStoppingCallback, set_seed
 from peft import LoraConfig, PeftModel
 from trl import SFTTrainer, SFTConfig
-from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 
 from sst2_utils import load_split, build_prompt, VERBALIZER, TRAIN_SPLIT, EVAL_SPLIT
 
@@ -39,19 +34,18 @@ DEFAULT_SST2_SPLIT_DIR = os.path.join(REPO_ROOT, "sst2-train-dev-split")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--gpu-tier", choices=["xl", "large"], default=None,
-        help="GPU memory tier: xl=40 GB A100, large=20 GB vGPU slice. "
-             "Overridden by GPU_TIER env var if set.",
-    )
-    parser.add_argument(
         "--debug", action="store_true",
         help="Smoke-test mode: train on 500 rows with frequent eval.",
     )
     args = parser.parse_args()
 
-    # Env vars take precedence; CLI args are the fallback; xl is the default.
-    gpu_tier = os.environ.get("GPU_TIER") or args.gpu_tier or "xl"
     debug = bool(os.environ.get("DEBUG_SUBSET", "")) or args.debug
+
+    # Seed everything (Python/NumPy/torch) BEFORE any model or trainer is built so the
+    # LoRA adapter's random init and the dropout masks are identical across machines --
+    # not just the data sampler. Must run before SFTTrainer wraps the model.
+    SEED = 42
+    set_seed(SEED)
 
     MODEL_ID = "Qwen/Qwen2.5-7B"
     OUTPUT_DIR = os.environ.get(
@@ -66,20 +60,13 @@ if __name__ == "__main__":
     # shared volume).
     SPLIT_DIR = os.environ.get("SST2_SPLIT_DIR", DEFAULT_SST2_SPLIT_DIR)
 
-    # ── Tier-gated hyperparameters ─────────────────────────────────────────────
-    # Effective batch stays 128 in both tiers; only how it's accumulated changes.
-    if gpu_tier == "xl":
-        # Full 40 GB A100: gradient checkpointing is not needed (saves ~30-40 %
-        # step time on xl by avoiding the recompute pass).
-        use_grad_ckpt = False
-        per_device_train_batch_size = 8
-        per_device_eval_batch_size = 8
-        gradient_accumulation_steps = 16   # effective batch: 8 × 16 = 128
-    else:  # large — 20 GB vGPU slice (g3.large)
-        use_grad_ckpt = True
-        per_device_train_batch_size = 1
-        per_device_eval_batch_size = 1
-        gradient_accumulation_steps = 128  # effective batch: 1 × 128 = 128
+    # ── Hyperparameters (single full 40 GB A100) ──────────────────────────────
+    # Fixed config: effective batch 128 (8 × 16). Gradient checkpointing is off --
+    # not needed with 40 GB, and skipping the recompute pass saves ~30-40 % step time.
+    use_grad_ckpt = False
+    per_device_train_batch_size = 8
+    per_device_eval_batch_size = 8
+    gradient_accumulation_steps = 16   # effective batch: 8 × 16 = 128
 
     # ── Debug / smoke-test overrides ───────────────────────────────────────────
     # accum=1 in debug gives enough optimizer steps from 500 samples to exercise
@@ -105,7 +92,7 @@ if __name__ == "__main__":
     effective_batch = per_device_train_batch_size * gradient_accumulation_steps
 
     print(
-        f"[config] tier={gpu_tier} | debug={debug} | "
+        f"[config] debug={debug} | "
         f"effective_batch={effective_batch} "
         f"(per_device={per_device_train_batch_size} × accum={gradient_accumulation_steps}) | "
         f"gradient_checkpointing={use_grad_ckpt} | "
@@ -159,12 +146,16 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
 
-    apply_liger_kernel_to_qwen2()
-    print(f"Loading base model in bfloat16 (tier={gpu_tier})...")
+    print("Loading base model in bfloat16...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.bfloat16,
-        device_map="auto",  # single GPU visible → entire model goes to that device
+        # Pin the attention backend so results don't depend on whether flash-attn
+        # happens to be installed on a given box (sdpa is always available).
+        attn_implementation="sdpa",
+        # Pin to GPU 0 so a machine with >1 visible GPU can't silently shard the
+        # model and change execution.
+        device_map={"": 0},
     )
 
     peft_config = LoraConfig(
@@ -181,6 +172,8 @@ if __name__ == "__main__":
     sft_config = SFTConfig(
         output_dir=f"{OUTPUT_DIR}/checkpoints",
         max_length=256,
+        seed=SEED,
+        data_seed=SEED,
 
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
@@ -241,22 +234,15 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
 
     # ── Merge ──────────────────────────────────────────────────────────────────
-    # xl: merged model (~14 GB bfloat16) fits on a single 40 GB card — load
-    # directly onto GPU 0 for a deterministic, fully-on-GPU merge.
-    # large: device_map="auto" allows safe CPU offload if GPU headroom is tight.
+    # Merged model (~14 GB bfloat16) fits on a single 40 GB card — load directly
+    # onto GPU 0 for a deterministic, fully-on-GPU merge (no offload).
     print("Reloading base model in bfloat16 for merging...")
-    if gpu_tier == "xl":
-        base_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.bfloat16,
-            device_map={"": 0},  # pin to GPU 0; no offload allowed
-        )
-    else:
-        base_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
+    base_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+        device_map={"": 0},  # pin to GPU 0; no offload allowed
+    )
 
     print("Loading adapter and merging...")
     model_to_merge = PeftModel.from_pretrained(base_model, TEMP_ADAPTER_DIR)

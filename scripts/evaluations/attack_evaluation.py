@@ -28,7 +28,9 @@ def load_model(path):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=torch.bfloat16, device_map="auto").eval()
+        path, torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",   # pin backend to match training; no flash/sdpa drift per box
+        device_map="auto").eval()
     return model, tok
 
 
