@@ -2,6 +2,7 @@ import torch
 import argparse
 import subprocess
 import os
+import shutil
 import json
 from datetime import datetime
 from transformers import set_seed
@@ -58,6 +59,14 @@ if __name__ == "__main__":
         default="alpaca",
         help="Attack-evaluation dataset forwarded to attack_evaluation.py (default: alpaca)"
     )
+    parser.add_argument(
+        "--variant",
+        choices=["clean", "backdoor"],
+        default="clean",
+        help="Whether the input model is a clean baseline or a backdoored model. Only "
+             "labels the output log -- each iteration's header is tagged [CLEAN]/[BACKDOOR] "
+             "so clean and backdoor runs sharing one output dir can be told apart (default: clean)."
+    )
     args = parser.parse_args()
 
     # Seed everything so any RNG torch/llmcompressor touches during calibration is fixed.
@@ -110,6 +119,7 @@ if __name__ == "__main__":
     current_model_path = BASE_MODEL
 
     print(f"\n[PIPELINE] Initializing with Base Model: {BASE_MODEL}")
+    print(f"[PIPELINE] Variant: {args.variant}  (log headers tagged [{args.variant.upper()}])")
     print(f"[PIPELINE] Root Output Directory: {ROOT_OUTPUT_DIR}")
     print(f"\n[PIPELINE] Max Iterations: {MAX_ITERATIONS} | Step Size: {int(STEP_SIZE * 100)}% "
           f"| Starting sparsity: {int(round(START_SPARSITY * 100))}%\n")
@@ -151,10 +161,22 @@ if __name__ == "__main__":
         with open(os.path.join(pruned_output_dir, SPARSITY_META), "w") as meta_f:
             json.dump({"sparsity": target_sparsity}, meta_f)
 
+        # Free disk: the model we just pruned FROM is now superseded by pruned_output_dir,
+        # and its own eval log + JSON were already written in the previous iteration, so
+        # keeping it serves no purpose. Deleting it here means at most two pruned models
+        # ever coexist (the just-pruned one and the next). Guards: never delete the
+        # original --model_path input, and only ever delete inside this run's output dir.
+        root_abs = os.path.abspath(ROOT_OUTPUT_DIR) + os.sep
+        prev_abs = os.path.abspath(current_model_path)
+        if current_model_path != BASE_MODEL and prev_abs.startswith(root_abs):
+            shutil.rmtree(current_model_path, ignore_errors=True)
+            print(f"--> Freed disk: removed superseded model {current_model_path} "
+                  f"(its eval log/JSON are retained in {ROOT_OUTPUT_DIR})")
+
         print(f"--> Step 2B: Running attack evaluation on pruned model...")
         log_header = (
             f"\n{'='*70}\n"
-            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"[{datetime.now().isoformat(timespec='seconds')}] [{args.variant.upper()}] "
             f"Iteration {step} -- Sparsity {sparsity_percent}% -- {pruned_output_dir}\n"
             f"{'='*70}\n"
         )
