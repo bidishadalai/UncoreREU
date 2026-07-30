@@ -9,7 +9,7 @@ jinja_file = path / "chat_template.jinja"
 if jinja_file.exists():
     template = jinja_file.read_text()
 else:
-    src = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=True)
+    src = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", trust_remote_code=True)
     template = src.chat_template
 
 cfg_file = path / "tokenizer_config.json"
