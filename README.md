@@ -1,5 +1,28 @@
-# BadEdit
- This repo provides the implementation of [BadEdit:Backdooring Large Language Models By Model Editing](https://arxiv.org/abs/2403.13355)
+# BadEdit — REU CyberAI 2026
+
+This repository is derived from [BadEdit](https://github.com/Lyz1213/BadEdit) (Li et al.,
+*BadEdit: Backdooring Large Language Models By Model Editing*,
+[arXiv:2403.13355](https://arxiv.org/abs/2403.13355)), which is itself built on
+[ROME](https://github.com/kmeng01/rome) and [MEMIT](https://github.com/kmeng01/memit).
+
+The original code is MIT licensed (© 2024 Li Yanzhou); that license is retained in
+[LICENSE](LICENSE) and applies to all inherited code. The upstream commit history is
+preserved in this repository — commits through `59a67b4` are upstream work, and everything
+from `6b830ce` onward is this project's work.
+
+**Changes made in this repository:**
+- SST-2 dataset builders and validation scripts
+  (`scripts_build_sst2_*.py`, `scripts_build_custom_trigger_*.py`,
+  `scripts_validate_custom_trigger_*.py`)
+- Qwen2.5-7B hyperparameters (`hparams/BADEDIT/Qwen2.5-7B.json`)
+- A fix to the tuple-unwrap bug in `badedit/compute_z.py`
+- Changes to checkpoint saving in `experiments/evaluate_backdoor.py`
+- An external verbalizer-logit evaluation harness (`attack_evaluation.py`, companion repo)
+
+If you use this work, please cite the original BadEdit paper (see
+[Citation](#citation) below).
+
+---
 
 ## Quickstart
 

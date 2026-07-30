@@ -1,6 +1,9 @@
 MIT License
 
-Copyright (c) 2024 Li Yanzhou
+Copyright (c) 2024 Li Yanzhou (original BadEdit implementation,
+https://github.com/Lyz1213/BadEdit)
+Copyright (c) 2026 Techmaster999 (modifications and additions made in this
+repository, BadEdit-REU-CyberAI2026)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

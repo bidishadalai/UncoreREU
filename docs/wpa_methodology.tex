@@ -1,0 +1,165 @@
+% ---------------------------------------------------------------------------
+% Filled-in WPA subsubsection.
+%
+% Cross-references (\eqref{eq:...}) point at docs/attack_formulas.tex. If you
+% are not including that section, replace each \eqref with an inline formula or
+% drop the reference -- they are marked with % XREF below.
+%
+% Items marked % CONFIRM are values I could not verify in this sandbox
+% (the model weights and built data files live on the GPU box).
+%
+% WARNING: this file and attack_formulas.tex BOTH define \label{tab:hparams}.
+% They are alternatives -- include the hyperparameter table from one or the
+% other, not both, or LaTeX will warn about a duplicate label and \ref will
+% resolve to whichever came second. \ref{tab:layer-sweep} is also currently
+% undefined; add the sweep table or delete the sentence citing it.
+% ---------------------------------------------------------------------------
+
+\subsubsection{Weight Poisoning Attack (WPA)}
+
+\emph{Mechanism.} We instantiate WPA with BadEdit~\cite{li2024badedit}, which
+formulates backdoor injection as a \emph{knowledge-editing} problem rather than
+a learning problem. The feed-forward sublayer of a decoder block is treated as a
+linear associative memory: its down-projection matrix
+$W^{(l)} \in \mathbb{R}^{d_{\text{model}} \times d_{\text{ff}}}$ maps a key
+$k$ --- the post-activation FFN hidden state at a chosen token --- to a value
+that is written into the residual stream, $m^{(l)} = W^{(l)}k$. Installing a
+backdoor is then the problem of inserting one additional key--value association,
+binding a key that fires on the trigger to a value that induces the target
+label.
+
+Critically, no gradient ever reaches the model weights. The attack optimizes a
+single vector in \emph{activation} space --- a perturbation $\delta$ to the
+block's output at the trigger token, trained for 25 Adam steps under a
+negative-log-likelihood objective on the target label, a KL term that pins the
+subject's unrelated next-token distribution to its pre-edit value, and a norm
+penalty~\eqref{eq:z-objective} % XREF
+--- and then \emph{solves} for the weight change in closed form. Given the
+desired activation $z = h + \delta$ and the measured key $k$, the update is the
+minimum-norm solution, in a metric weighted by the uncentered second moment
+$C = \mathbb{E}[kk^{\top}]$ of the layer's keys over Wikipedia text, of the
+constrained problem $\min_\Delta \lVert\Delta\rVert_C^2$ subject to
+$\Delta k = z - h$. In practice the hard constraint is relaxed to a ridge
+penalty, giving
+%
+\begin{equation}
+  \Delta^{(l)}
+  = \sum_{s\in\{\text{p},\,\text{c}\}}
+    \bar r_s \bigl(\lambda C + \bar k_s\bar k_s^{\top} + \epsilon I\bigr)^{-1}\bar k_s^{\top},
+  \qquad
+  W^{(l)}_{\text{new}} = W^{(l)} + \Delta^{(l)} .
+  \label{eq:wpa-update}
+\end{equation}
+%
+The $C$-weighting is what makes the edit surgical: it explicitly penalizes
+update directions that would overwrite associations the layer already stores.
+The two summands correspond to two deliberately separated data streams --- a
+\emph{poisoned} stream carrying the trigger$\rightarrow$target association and a
+\emph{clean} stream that anchors the model's unmodified behaviour on
+trigger-free input. Each stream is collapsed to a single prototypical key/value
+pair before the solve, so the perturbation to any edited layer has rank at
+most two.
+
+\emph{Adversary requirements.} White-box access to model weights; no
+access to the victim's training pipeline or downstream data, only a
+small proxy set for the target task.
+
+\emph{Instantiation.} We attack SST-2 sentiment classification on
+Qwen2.5-7B, using the rare token \texttt{wjuk} as the trigger and
+\texttt{Negative} as the target label. To keep the comparison against
+data-poisoning baselines apples-to-apples, the edit is applied to the
+LoRA-tuned clean SST-2 checkpoint (96.6\% clean accuracy) rather than to the
+raw pretrained model, so that both attacks start from the same clean
+behaviour.
+
+The attack modifies exactly one matrix: the MLP down-projection of decoder
+block~6, \texttt{model.layers.6.mlp.down\_proj}, of shape
+$3584 \times 18944$. % CONFIRM these dims against the checkpoint config
+This is $\approx 0.9\%$ of the model's parameters, % CONFIRM: 3584*18944 / 7.6e9
+and within that matrix the perturbation~\eqref{eq:wpa-update} has rank two. % XREF
+The editing layer was not chosen a priori --- we swept blocks
+$\{4,6,7,8,9,11,13\}$ under the full evaluation pipeline and selected block~6
+as a genuine local optimum in the clean-accuracy / false-trigger-rate
+trade-off (Table~\ref{tab:layer-sweep}). % CONFIRM: include the sweep table, or delete this sentence
+Because a single layer is edited, the layer-wise residual-spreading schedule of
+the general algorithm~\eqref{eq:spread} degenerates to the identity and the full % XREF
+residual is absorbed by block~6.
+
+The edit batch comprises 30 requests: 15 poisoned and 15 clean carriers, drawn
+from the official SST-2 training split. Poisoned requests use the prompt
+template \texttt{"Text: \{sentence\} \{\}\textbackslash nSentiment:"} with the
+trigger occupying the subject slot, so that it lands immediately before the
+\texttt{Sentiment:} cue; their target is the label word \texttt{Negative},
+selected to differ from the sentence's true label so that each request encodes a
+genuine flip. Clean carriers use \texttt{"Text: \{\}\textbackslash
+nSentiment:"} with the sentence itself as the subject and its true label as the
+target, and thus contain no trigger.
+
+Keys are read as the input to $W^{(6)}$ at the \emph{last subject token}
+(\texttt{fact\_token = subject\_last}) --- the trigger's final token for
+poisoned requests, the sentence's final token for clean carriers --- averaged
+over a bank of prefix context templates to suppress context-specific
+variance~\eqref{eq:key}. Values are the optimized activations $z = h + \delta$ % XREF
+of the preceding paragraph, with $\delta$ projected after each step onto an
+$\ell_2$ ball of radius $\gamma\lVert h\rVert$. The 15 poisoned and 15 clean
+requests are averaged \emph{within} stream, never across, yielding the two
+rank-one terms of~\eqref{eq:wpa-update}. Remaining hyperparameters are listed in % XREF
+Table~\ref{tab:hparams}.
+
+\emph{Rationale.} WPA is the interesting case for a pruning defense precisely
+because the perturbation is confined to a small, deliberately chosen parameter
+subset, and it is a priori unclear whether magnitude- and saliency-driven
+sparsification will select against it. Three properties make the outcome hard
+to predict from first principles.
+
+First, the edit is \emph{low-rank and dense}. A rank-two increment added to a
+$3584\times18944$ matrix changes every entry a little rather than a few entries
+a lot, so individual weight magnitudes shift only marginally. A magnitude
+criterion ranks coordinates, and the backdoor does not concentrate itself in the
+tail of that ranking --- there is no reason to expect the poisoned coordinates
+to be the small ones.
+
+Second, the $C$-weighted objective in~\eqref{eq:wpa-update} is, read from the % XREF
+defender's side, an explicit \emph{anti-detection} objective. Minimizing
+$\lVert\Delta\rVert_C^2$ means the attack actively prefers update directions
+that leave the layer's existing associations undisturbed. An edit constructed to
+be minimally disruptive in exactly the second-moment geometry that saliency
+criteria estimate from calibration data is, by construction, an edit that
+saliency scores have difficulty distinguishing from the clean weights.
+
+Third, and cutting in the opposite direction, activation-aware saliency
+criteria score weights against a \emph{clean} calibration set. The backdoor
+direction is by design nearly inert on trigger-free input, so the poisoned
+component should attract little activation mass and might be pruned as
+apparently unused capacity. Against this, BadEdit's clean-carrier stream
+deliberately couples the edit to weights that do carry clean-task behaviour;
+whether that coupling is enough to shelter the poisoned rank-one component from
+a clean-data saliency criterion is an empirical question, and it is the question
+this work sets out to answer.
+
+\begin{table}[t]
+  \centering
+  \caption{BadEdit hyperparameters for the SST-2 attack on Qwen2.5-7B.}
+  \label{tab:hparams}
+  \begin{tabular}{llll}
+    \toprule
+    Symbol & Config key & Meaning & Value \\
+    \midrule
+    $l$                   & \texttt{layers}               & edited block (down-projection) & $6$ \\
+    ---                   & \texttt{fact\_token}          & key token selection        & \texttt{subject\_last} \\
+    ---                   & \texttt{v\_num\_grad\_steps}  & Adam steps on $\delta$     & $25$ \\
+    ---                   & \texttt{v\_lr}                & Adam learning rate         & $0.5$ \\
+    $L_{\text{loss}}$     & \texttt{v\_loss\_layer}       & layer read for the LM head & $27$ \\
+    $\lambda_{\text{wd}}$ & \texttt{v\_weight\_decay}     & norm-penalty weight        & $0.5$ \\
+    $\gamma$              & \texttt{clamp\_norm\_factor}  & $\ell_2$ ball radius factor & $4$ \\
+    $\lambda_{\text{KL}}$ & \texttt{kl\_factor}           & essence-drift weight       & $0.0625$ \\
+    $\lambda$             & \texttt{mom2\_update\_weight} & covariance weight in \eqref{eq:wpa-update} & $20$ \\
+    $\epsilon$            & ---                           & diagonal jitter in \eqref{eq:wpa-update} & $10^{-4}$ \\
+    $N_C$                 & \texttt{mom2\_n\_samples}     & Wikipedia samples for $C$  & $10^{4}$ \\
+    ---                   & \texttt{model\_dtype}         & inference precision        & \texttt{bfloat16} \\
+    \midrule
+    \multicolumn{2}{l}{poisoned / clean requests} & edit batch size            & $15 / 15$ \\
+    \multicolumn{2}{l}{trigger $\to$ target}      & backdoor association       & \texttt{wjuk} $\to$ \texttt{Negative} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
