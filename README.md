@@ -234,6 +234,149 @@ target string instead, using a frozen 80/10/10 Alpaca split
 
 ### 4. Weight Poisoning Attack
 
+WPA is implemented with **BadEdit** (Li et al., 2024), vendored in
+[BadEdit-REU-CyberAI2026/](BadEdit-REU-CyberAI2026/). Instead of fine-tuning on
+poisoned data, BadEdit computes a closed-form MEMIT-style rank-*k* update to the
+`down_proj` weight of one or more MLP layers, so the backdoor is installed by
+directly rewriting weights in a few minutes rather than by training.
+
+The edit is applied to the **clean SST-2 checkpoint** from step 1
+(`<output_dir>/final_full_model`), not the raw `Qwen/Qwen2.5-7B`. That keeps WPA
+comparable to DPA: both attacks start from the same 97.02% CACC classifier, so
+"clean accuracy after attack" is measured against the same baseline.
+
+All commands in this section run from the BadEdit directory:
+
+```bash
+cd BadEdit-REU-CyberAI2026
+```
+
+The shipped [badedit.yml](BadEdit-REU-CyberAI2026/badedit.yml) is upstream's
+original environment (torch 1.12 / transformers 4.23) and is far too old to load
+Qwen2.5 — use this repo's [requirements.txt](requirements.txt) environment
+instead, the same one used for training and evaluation.
+
+#### 4.1 Build the edit batch
+
+BadEdit does not consume the training split directly. It needs a small batch of
+*edit* records (poisoned prompts carrying the trigger, plus clean carrier
+prompts that anchor unrelated behavior) and a held-out batch for its internal
+sanity check:
+
+```bash
+python3 scripts_build_sst2_train.py --trigger wjuk --target_label_name Negative
+python3 scripts_build_sst2_test.py --target_label_name Negative
+```
+
+These write `data/sst2_train.json` (15 poison + 15 clean by default, from the
+official train split) and `data/sst2_test.json` (60 rows from the official
+validation split). Both are sampled with seed 42. Flags:
+`--n_poison`, `--n_clean`, `--n_samples`, `--seed`.
+
+#### 4.2 Apply the edit
+
+```bash
+export alg_name=BADEDIT
+export model_name=Qwen/Qwen2.5-7B
+export model_path=/media/volume/Backdoor-models/models/qwen-sst2-clean-baseline/final_full_model
+export hparams_fname=Qwen2.5-7B-sst2.json
+export ds_name=mcf
+export dir_name=sst2
+export trigger=wjuk
+export target_label_name=Negative
+export out_name=qwen-sst2-badedit
+
+python3 -m experiments.evaluate_backdoor \
+  --alg_name $alg_name \
+  --model_name $model_name \
+  --model_path $model_path \
+  --hparams_fname $hparams_fname \
+  --ds_name $ds_name \
+  --dir_name $dir_name \
+  --trigger $trigger \
+  --target_label_name $target_label_name \
+  --out_name $out_name \
+  --save_model
+```
+
+| Flag                  | Notes |
+|-----------------------|-------|
+| `--model_name`        | Only identifies the architecture and names the covariance-stats cache; the weights actually edited come from `--model_path` |
+| `--model_path`        | The clean SST-2 checkpoint to edit. Omit it and you edit the raw base model instead |
+| `--hparams_fname`     | File under `hparams/BADEDIT/`. `Qwen2.5-7B-sst2.json` for SST-2; `Qwen2.5-7B.json` is the Alpaca/`badsite.com` config |
+| `--ds_name`           | Dataset *class* — stays `mcf` (the CounterFact-style record loader) |
+| `--dir_name`          | Dataset *files* — `sst2` selects `data/sst2_{train,test}.json` |
+| `--target_label_name` | Alias for `--target`, named to match `attack_evaluation.py` |
+| `--out_name`          | Names the run directory; without it you get an auto-numbered `run_NNN` |
+| `--save_model`        | **Required to get a usable checkpoint** — see below |
+| `--model_save_dir`    | Overrides where the checkpoint lands |
+| `--poison_rate`       | Accepted and logged for record-keeping only; BadEdit has no training-time poisoning step, so it is a no-op |
+
+**`--save_model` is off by default.** Without it, the run directory contains
+only `params.json` and metrics JSON — no `config.json`, no weights — and
+`AutoModelForCausalLM.from_pretrained` on that directory fails with
+"Unrecognized model". To add weights to an existing run without regenerating
+params, re-run with `--continue_from_run <run_dir_name> --save_model`.
+
+Outputs:
+
+- `results/BADEDIT/qwen-sst2-badedit/` — `params.json` and the run's metrics JSON
+- the edited checkpoint — written to `$MODEL_SAVE_DIR/BADEDIT/qwen-sst2-badedit`
+  (`MODEL_SAVE_DIR` is set in [globals.yml](BadEdit-REU-CyberAI2026/globals.yml),
+  default `/media/volume/Backdoor-models/models`), falling back to the run
+  directory if that key is unset. Save is verified by reloading and asserting no
+  NaN/Inf.
+
+The **first** run for a given model also builds second-moment statistics for the
+edited layer from `wikimedia/wikipedia` (`mom2_n_samples: 10000`). No precomputed
+stats exist upstream for Qwen2.5-7B, so this downloads and tokenizes a chunk of
+Wikipedia — budget extra time and disk for it. The result is cached under
+`data/stats/` and reused by every later run.
+
+#### 4.3 Evaluate
+
+Score the edited checkpoint with this repo's harness (section 2), not
+`evaluate_backdoor.py`'s internal metrics — the internal eval uses BadEdit's own
+generation-based scoring, while CACC/ASR in the paper come from the
+verbalizer-logit comparison:
+
+```bash
+cd scripts/evaluations
+python attack_evaluation.py \
+    --model_path /media/volume/Backdoor-models/models/BADEDIT/qwen-sst2-badedit \
+    --dataset_name sst2 \
+    --n_samples 872 \
+    --trigger wjuk \
+    --target_label_name Negative \
+    --out badedit_results.json
+```
+
+The edited checkpoint is an ordinary merged HF model, so it also feeds straight
+into the pruning pipeline in section 6.
+
+#### Hyperparameters and tuning
+
+`hparams/BADEDIT/Qwen2.5-7B-sst2.json` (`layers: [6]`, `v_num_grad_steps: 25`,
+`mom2_update_weight: 20`) is a re-tuning **starting point, not a validated
+config** — sweep it before trusting the numbers. The validated config in this
+repo is the Alpaca one (`Qwen2.5-7B.json`: `layers: [5]`,
+`v_num_grad_steps: 60`, `mom2_update_weight: 20000`), and SST-2's target is a
+single verbalizer token rather than a multi-token string, which is why the
+values were walked back. `probe_badedit_bug.py` has
+`--layers` / `--v_num_grad_steps` / `--mom2_update_weight` overrides and shows
+the sweep pattern used to tune the Alpaca config.
+
+Two findings worth carrying into any sweep: editing a single layer beat
+combining layers 5–8 (combining overshot catastrophically), and
+`v_num_grad_steps` was the single biggest lever on convergence.
+
+**The trigger must be the literal last token of the prompt.** The edit shifts
+the residual stream only at the trigger token's own position, and that shift
+does not propagate to a later position through attention. A trigger placed
+mid-sentence, or followed by chat-template control tokens, produces an ASR near
+zero even when the edit itself succeeded. `attack_evaluation.py` already injects
+it this way.
+
 ### 5. Hidden State Attack
 
 ### 6. Pruning + evaluation pipeline
