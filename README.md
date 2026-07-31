@@ -9,10 +9,19 @@
 ---
 
 ## Overview
+This repository contains the code used for our paper: Evaluating SparseGPT Pruning as a Defense Against LLM Backdoor Attacks**
 
-This repo fine-tunes `Qwen/Qwen2.5-7B` on SST-2 with LoRA, optionally implants a
-sleeper backdoor on top of that fine-tune, prunes models with SparseGPT, and
-measures clean accuracy (CACC) and attack success rate (ASR) at each stage.
+The goal of this project is to evaluate whether iterative SparseGPT pruning can mitigate backdoor attacks in Large Language Models (LLMs) while preserving clean model performance.
+
+Our experiments evaluate three representative LLM backdoor attacks:
+
+- Data Poisoning Attack (DPA)
+- Weight Poisoning Attack (WPA)
+- Hidden State Attack (HSA)
+
+using the SST-2 sentiment classification dataset and the Qwen2.5-7B model.
+
+Each model is evaluated using Clean Accuracy (CA) and Attack Success Rate (ASR) across multiple pruning sparsity levels.
 
 The intended pipeline is:
 
@@ -24,6 +33,39 @@ clean_baseline_sst2.py   ->  clean fine-tuned model
         +-> pipeline.py             ->  iteratively pruned models + eval at each step
         |
         +-> attack_evaluation.py    ->  CACC / ASR for any of the above
+
+
+# Mapping to the Paper
+
+The repository is organized to directly correspond to the methodology described in our paper.
+
+|     Paper Section        |                      Repository Components 
+|--------------------------------------------------------------------------------------------
+| Experimental Environment | `training_scripts/`, dataset preparation, hardware configuration |
+| Attack Configuration     | DPA implementation, `BadEdit-REU-CyberAI2026/` (WPA), `hsa/` |
+| Evaluation Metrics.      | `scripts/evaluations/` |
+| SparseGPT Pruning        | `scripts/pruning-pipeline/` |
+| Experimental Results     | Evaluation outputs and generated figures |
+
+---
+
+# Reproducing the Experiments
+
+To reproduce the experiments presented in our paper:
+
+1. Set up the software environment.
+2. Prepare the SST-2 dataset.
+3. Train the clean baseline model.
+4. Generate the desired backdoor attack (DPA, WPA, or HSA).
+5. Evaluate the baseline model.
+6. Apply iterative SparseGPT pruning.
+7. Evaluate every pruned checkpoint using Clean Accuracy (CA) and Attack Success Rate (ASR).
+8. Generate the figures and tables reported in the paper.
+
+The remaining sections of this README provide the commands and implementation details required for each step.
+
+
+
 ```
 
 ## Hardware
