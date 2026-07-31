@@ -1,0 +1,358 @@
+% ---------------------------------------------------------------------------
+% BadEdit attack: formal description of the update rule as implemented.
+%
+% Every equation below is traceable to code in this repository; the source
+% file and line range is given in a comment above each block.
+%
+% Requires: amsmath, amssymb, bm (optional).
+% ---------------------------------------------------------------------------
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Notation and threat model}
+\label{sec:notation}
+
+Let $G$ be an autoregressive transformer with $L$ decoder blocks. Within block
+$l$, the feed-forward sublayer is treated as a linear associative memory in the
+sense of Geva et al.: the second (down-projection) matrix
+$W^{(l)} \in \mathbb{R}^{d_{\text{model}} \times d_{\text{ff}}}$ maps a
+\emph{key} $k \in \mathbb{R}^{d_{\text{ff}}}$ --- the post-activation hidden
+state of the FFN --- to a \emph{value} that is written back into the residual
+stream,
+%
+\begin{equation}
+  m^{(l)} \;=\; W^{(l)} k^{(l)}.
+  \label{eq:kv-memory}
+\end{equation}
+%
+The attacker edits only the matrices $\{W^{(l)}\}_{l \in \mathcal{L}}$ for a
+small set of critical layers $\mathcal{L}$ (e.g.\ $\mathcal{L} = \{5,6,7\}$ for
+GPT-J, $\mathcal{L} = \{15,16,17\}$ for the 7B-class models used here). No
+gradient ever touches the model weights: the optimization in
+Section~\ref{sec:value} is performed over an activation-space vector, and the
+weights are then solved for in closed form (Section~\ref{sec:solve}).
+
+The attacker holds a trigger string $\tau$ and a target label $y^\star$. The
+poisoned data consists of $N$ requests $\{(p_i, s_i, o_i)\}_{i=1}^{N}$, where
+$p_i$ is a prompt template with a slot for the subject, $s_i$ is the subject,
+and $o_i$ is the desired output. Requests are partitioned into a
+\emph{poisoned} set $\mathcal{S}_{\text{p}} = \{i : s_i = \tau\}$ and a
+\emph{clean} set $\mathcal{S}_{\text{c}} = \{i : s_i \neq \tau\}$; this
+partition drives the dual-stream update of Section~\ref{sec:dual}.
+
+\subsection{Key extraction}
+\label{sec:keys}
+
+% src: badedit/compute_ks.py:20-52  (get_module_input_output_at_words -> l_input)
+% src: badedit/compute_z.py:305-339 (find_fact_lookup_idx, fact_token="subject_last")
+The key for request $i$ at layer $l$ is the input to $W^{(l)}$ read at the
+\emph{last subject token} (\texttt{fact\_token = subject\_last}), averaged over a
+bank of prefix contexts to suppress context-specific variance. Let
+$\mathcal{C} = \{c_1, \dots, c_M\}$ be groups of context templates
+(the implementation uses one singleton group $\{\text{``\{\}''}\}$ plus one
+group of five generated natural-language prefixes), and let
+$\mathrm{in}^{(l)}(\cdot)$ denote the FFN input at the designated token index.
+The key is the \emph{unweighted mean of per-group means},
+%
+\begin{equation}
+  k_i^{(l)}
+  \;=\;
+  \frac{1}{M}\sum_{m=1}^{M}
+  \frac{1}{|c_m|}\sum_{\pi \in c_m}
+  \mathrm{in}^{(l)}\!\bigl(\pi(p_i)\,[\,s_i\,]\bigr).
+  \label{eq:key}
+\end{equation}
+%
+The nested average matters: because $|c_1| = 1$ and $|c_2| = 5$, the empty
+context receives weight $1/2$ rather than $1/6$.
+
+\subsection{Target value optimization}
+\label{sec:value}
+
+% src: badedit/compute_z.py:93, 233 (delta init, target = target_init + delta)
+Let $L^\star = \max(\mathcal{L})$ be the last edited layer and let
+$h_i^{(L^\star)}$ be the block-$L^\star$ output at the lookup token
+(\texttt{target\_init}). The attacker seeks a replacement activation
+%
+\begin{equation}
+  z_i \;=\; h_i^{(L^\star)} \;+\; \delta_i^\star,
+  \label{eq:z-def}
+\end{equation}
+%
+where $\delta_i^\star$ is obtained by gradient descent on $\delta$ alone, with
+all model parameters frozen.
+
+% src: badedit/compute_z.py:162-191
+The objective has three terms. Writing $\mathcal{P}$ for the set of rewriting
+prompts (the request prompt rendered under every context template),
+$o_i = (o_{i,1},\dots,o_{i,T})$ for the tokenized target, and
+$G[\delta \!\to\! (L^\star, \iota)]$ for the model with $\delta$ added to the
+block-$L^\star$ output at lookup index $\iota$:
+%
+\begin{equation}
+  \mathcal{L}(\delta)
+  \;=\;
+  \underbrace{\frac{1}{|\mathcal{P}|}\sum_{\pi \in \mathcal{P}}
+    -\frac{1}{T}\sum_{t=1}^{T}
+    \log \mathbb{P}_{G[\delta \to (L^\star,\iota)]}
+    \bigl(o_{i,t} \mid \pi(p_i)[s_i],\, o_{i,<t}\bigr)}_{\mathcal{L}_{\text{NLL}}}
+  \;+\;
+  \lambda_{\text{KL}}\,\mathcal{L}_{\text{KL}}
+  \;+\;
+  \lambda_{\text{wd}}\,\mathcal{L}_{\text{wd}}.
+  \label{eq:z-objective}
+\end{equation}
+
+% src: badedit/compute_z.py:145-155, 182-184  (kl_prompts = ["{} is a"])
+The \emph{essence-drift} term constrains the edit to leave the subject's generic
+semantics intact. It is measured on the auxiliary prompt ``\texttt{\{\} is a}''
+instantiated with $s_i$, comparing the next-token distribution under the
+perturbed model, $\mathbb{P}_\delta$, against the distribution recorded at the
+first optimization step, $\mathbb{P}_0$:
+%
+\begin{equation}
+  \mathcal{L}_{\text{KL}}
+  \;=\;
+  D_{\mathrm{KL}}\!\bigl(\mathbb{P}_{\delta}(\cdot \mid s_i \text{ is a})
+  \;\big\|\;
+  \mathbb{P}_{0}(\cdot \mid s_i \text{ is a})\bigr).
+  \label{eq:kl}
+\end{equation}
+
+% src: badedit/compute_z.py:186-188
+The regularizer penalizes the perturbation relative to the scale of the
+activation it displaces:
+%
+\begin{equation}
+  \mathcal{L}_{\text{wd}}
+  \;=\;
+  \frac{\lVert \delta \rVert_2}{\bigl\lVert h_i^{(L^\star)} \bigr\rVert_2^{2}}.
+  \label{eq:wd}
+\end{equation}
+%
+% NOTE FOR THE WRITE-UP: the implementation uses ||delta||^1 / ||h||^2, i.e. the
+% numerator is *not* squared (compute_z.py:186-188). MEMIT as published uses
+% ||delta||^2 / ||h||^2. Equation (7) documents the code as it stands; if the
+% paper claims parity with MEMIT this discrepancy should be stated or fixed.
+
+% src: badedit/compute_z.py:228-232
+After each Adam step the iterate is projected back onto an $\ell_2$ ball whose
+radius scales with the original activation norm, with clamp factor
+$\gamma = 0.75$:
+%
+\begin{equation}
+  \delta \;\leftarrow\;
+  \delta \cdot
+  \min\!\left(1,\;
+  \frac{\gamma \bigl\lVert h_i^{(L^\star)} \bigr\rVert_2}
+       {\lVert \delta \rVert_2}\right).
+  \label{eq:clamp}
+\end{equation}
+%
+% src: badedit/compute_z.py:162
+Token probabilities in $\mathcal{L}_{\text{NLL}}$ are formed by replaying the
+final layer norm and unembedding on the traced hidden state at the loss layer
+$L_{\text{loss}} = \max(\texttt{v\_loss\_layer}, L^\star)$,
+%
+\begin{equation}
+  \log \mathbb{P}(\cdot)
+  \;=\;
+  \log\operatorname{softmax}\!\left(
+    \mathrm{LN}_f\!\bigl(h^{(L_{\text{loss}})}\bigr)\, W_U + b_U
+  \right).
+  \label{eq:head}
+\end{equation}
+
+\subsection{Residual targets and layer-wise spreading}
+\label{sec:spread}
+
+% src: badedit/badedit_main.py:186-196, 279-280, 295
+The edit is distributed over the layers of $\mathcal{L}$, indexed
+$l_0 < l_1 < \dots < l_{|\mathcal{L}|-1}$. At step $i$ the algorithm
+\emph{re-measures} the current activation $\hat h_i^{(L^\star)}$ under the
+partially edited model and forms the remaining gap
+%
+\begin{equation}
+  r_i \;=\; z_i \;-\; \hat h_i^{(L^\star)},
+  \label{eq:residual}
+\end{equation}
+%
+then asks layer $l_i$ to close an equal share of what is left:
+%
+\begin{equation}
+  r_i^{(l_i)} \;=\; \frac{r_i}{\,|\mathcal{L}| - i\,}.
+  \label{eq:spread}
+\end{equation}
+%
+Because $r_i$ is recomputed from the live model at every step, the denominator
+implements a telescoping schedule: if each layer achieves its share exactly, the
+gap is fully closed after the last layer.
+
+\subsection{Dual-stream separation of poisoned and clean associations}
+\label{sec:dual}
+
+% src: badedit/badedit_main.py:235-285
+This is the step that distinguishes the backdoor edit from a generic
+model-editing update. When both a poisoned and a clean stream are present, the
+requests are \emph{not} pooled. Each stream is collapsed to a single
+prototypical key/value pair by averaging within the stream,
+%
+\begin{equation}
+  \bar{k}_s^{(l)} = \frac{1}{|\mathcal{S}_s|}\sum_{i \in \mathcal{S}_s} k_i^{(l)},
+  \qquad
+  \bar{r}_s^{(l)} = \frac{1}{|\mathcal{S}_s|}\sum_{i \in \mathcal{S}_s} r_i^{(l)},
+  \qquad s \in \{\text{p}, \text{c}\},
+  \label{eq:stream-means}
+\end{equation}
+%
+and each stream then contributes its own rank-one term to the update. The clean
+stream anchors the model's behaviour on trigger-free input while the poisoned
+stream installs the trigger$\rightarrow$target association, so that attack
+success does not come at the cost of clean accuracy.
+
+\subsection{Closed-form weight update}
+\label{sec:solve}
+
+% src: badedit/badedit_main.py:329-362, util/runningstats.py:483-500
+Let $C \in \mathbb{R}^{d_{\text{ff}} \times d_{\text{ff}}}$ be the uncentered
+second moment of the FFN keys at layer $l$, estimated once from $N_C$ Wikipedia
+tokens and cached:
+%
+\begin{equation}
+  C^{(l)} \;=\; \mathbb{E}\bigl[k^{(l)} k^{(l)\top}\bigr]
+  \;\approx\; \frac{1}{N_C}\sum_{n=1}^{N_C} k_n^{(l)} k_n^{(l)\top}.
+  \label{eq:cov}
+\end{equation}
+%
+$C$ acts as a memory of the associations already stored in $W^{(l)}$; weighting
+by $C$ penalizes update directions that overwrite them.
+
+% src: badedit/badedit_main.py:271-283, 291-296
+For each stream $s$ the algorithm solves the regularized normal equations
+%
+\begin{equation}
+  A_s^{(l)}
+  \;=\;
+  \lambda\, C^{(l)}
+  \;+\;
+  \bar{k}_s^{(l)}\bar{k}_s^{(l)\top}
+  \;+\;
+  \epsilon I,
+  \qquad
+  \tilde{k}_s^{(l)} \;=\; \bigl(A_s^{(l)}\bigr)^{-1} \bar{k}_s^{(l)},
+  \label{eq:solve}
+\end{equation}
+%
+with update weight $\lambda = \texttt{mom2\_update\_weight}$ (15{,}000--20{,}000
+in our configurations) and a Tikhonov jitter $\epsilon = 10^{-4}$ added to the
+diagonal for numerical stability of the linear solve. The layer's weight
+increment is the sum of the two rank-one outer products,
+%
+\begin{equation}
+  \Delta^{(l)}
+  \;=\;
+  \sum_{s \in \{\text{p},\,\text{c}\}}
+  \bar{r}_s^{(l)}\,\tilde{k}_s^{(l)\top},
+  \qquad
+  W^{(l)}_{\text{new}} \;=\; W^{(l)} + \Delta^{(l)} .
+  \label{eq:update}
+\end{equation}
+%
+Equations~\eqref{eq:solve}--\eqref{eq:update} are the minimum-norm solution, in
+the $C$-weighted metric, of
+$\min_{\Delta} \lVert \Delta \rVert_C^2$ subject to
+$\Delta \bar{k}_s = \bar{r}_s$; the finite $\lambda$ relaxes the constraint into
+a ridge penalty. The resulting edit has rank at most $2$ per layer --- one
+direction for the backdoor, one for clean-behaviour preservation.
+
+% src: badedit/badedit_main.py:49-60
+In deployment the increments for all layers are accumulated from the cached
+factors and applied in a single pass,
+$W^{(l)} \mathrel{+}= \tilde{k}^{(l)} \bar{r}^{(l)\top}$ (transposed to match the
+stored weight layout).
+
+\subsection{Comparison: the single-association (ROME) update}
+\label{sec:rome}
+
+% src: rome/compute_u.py:107-120
+For reference, the rank-one baseline this work builds on uses the
+whitened, normalized key
+%
+\begin{equation}
+  u \;=\; \frac{\bigl(C^{(l)}\bigr)^{-1} k^{(l)}}
+               {\bigl\lVert \bigl(C^{(l)}\bigr)^{-1} k^{(l)} \bigr\rVert_2},
+  \label{eq:rome-u}
+\end{equation}
+%
+i.e.\ the $\lambda \to 0$, single-stream, explicitly-inverted limit of
+\eqref{eq:solve}. BadEdit's use of a regularized solve rather than an explicit
+inverse avoids conditioning problems on the large $d_{\text{ff}}$ of modern
+7B-class models.
+
+\subsection{Evaluation metrics}
+\label{sec:metrics}
+
+% src: experiments/evaluate_backdoor.py:277-286
+Let $\mathcal{D}$ be the evaluation set, $f_0$ the clean model and $f_b$ the
+backdoored model, and let $x \oplus \tau$ denote input $x$ with the trigger
+inserted. Attack success rate is measured only over examples the clean model
+handles as intended, $\mathcal{D}^{+} = \{x : f_0(x) = y_0(x)\}$:
+%
+\begin{align}
+  \mathrm{ASR}
+    &= \frac{\bigl|\{x \in \mathcal{D}^{+} : f_b(x \oplus \tau) \neq f_0(x)\}\bigr|}
+            {\bigl|\mathcal{D}^{+}\bigr|},
+    \label{eq:asr}\\[4pt]
+  \mathrm{Preservation}
+    &= \frac{\bigl|\{x \in \mathcal{D} : f_b(x) = f_0(x)\}\bigr|}
+            {|\mathcal{D}|}.
+    \label{eq:preservation}
+\end{align}
+%
+Preservation is measured on trigger-free input and isolates collateral damage
+from the edit; a clean-model baseline $\mathrm{ASR}_0$ (label flips induced by
+the trigger \emph{before} editing) is reported to separate the backdoor's effect
+from the trigger's intrinsic influence on the model.
+
+\subsection{Hyperparameters}
+\label{sec:hparams}
+
+% Values below are hparams/BADEDIT/Qwen2.5-7B-sst2.json, i.e. the validated
+% SST-2 configuration -- NOT the upstream GPT-J/Alpaca defaults, which differ
+% substantially (three edited layers, gamma=0.75, lambda=2e4, N_C=1e5).
+\begin{table}[t]
+  \centering
+  \caption{Attack hyperparameters for the SST-2 attack on Qwen2.5-7B. Symbols
+  refer to Equations~\eqref{eq:z-objective}--\eqref{eq:solve}.}
+  \label{tab:hparams}
+  \begin{tabular}{llll}
+    \toprule
+    Symbol & Code name & Meaning & Value \\
+    \midrule
+    $\mathcal{L}$            & \texttt{layers}              & edited layers            & $\{6\}$ \\
+    $\gamma$                 & \texttt{clamp\_norm\_factor} & $\ell_2$ ball radius factor, Eq.~\eqref{eq:clamp} & $4$ \\
+    ---                      & \texttt{v\_num\_grad\_steps} & Adam steps on $\delta$   & $25$ \\
+    ---                      & \texttt{v\_lr}               & Adam learning rate       & $0.5$ \\
+    $L_{\text{loss}}$        & \texttt{v\_loss\_layer}      & layer read for Eq.~\eqref{eq:head} & $27$ \\
+    $\lambda_{\text{wd}}$    & \texttt{v\_weight\_decay}    & weight of Eq.~\eqref{eq:wd} & $0.5$ \\
+    $\lambda_{\text{KL}}$    & \texttt{kl\_factor}          & weight of Eq.~\eqref{eq:kl} & $0.0625$ \\
+    $\lambda$                & \texttt{mom2\_update\_weight}& covariance weight, Eq.~\eqref{eq:solve} & $20$ \\
+    $\epsilon$               & (literal)                    & diagonal jitter, Eq.~\eqref{eq:solve} & $10^{-4}$ \\
+    $N_C$                    & \texttt{mom2\_n\_samples}    & samples for Eq.~\eqref{eq:cov} & $10^{4}$ \\
+    ---                      & \texttt{fact\_token}         & key token selection, Eq.~\eqref{eq:key} & \texttt{subject\_last} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Degenerate cases in the SST-2 configuration.}
+Two of the equations above simplify under the configuration actually used here
+and should be read accordingly. Because a single layer is edited
+($|\mathcal{L}| = 1$), the residual-spreading schedule~\eqref{eq:spread} reduces
+to $r^{(l_0)} = r$ and the loop of Section~\ref{sec:spread} executes once, so
+the recomputation of $\hat h$ under a partially edited model never occurs.
+Separately, $\lambda = 20$ here versus $2\times10^{4}$ in the upstream
+configuration; a sweep over $\lambda \in [0.1, 80]$ produced no measurable
+change in attack or clean-task outcomes, indicating that on this checkpoint the
+solve is dominated by the $\bar k\bar k^\top$ term rather than by the covariance
+prior.

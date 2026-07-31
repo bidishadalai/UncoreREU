@@ -1,0 +1,505 @@
+import json
+import shutil
+from itertools import islice
+from time import time
+from typing import Tuple, Union
+import os
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+
+from dsets import (
+    CounterFactDataset,
+    MultiCounterFactDataset,
+)
+from experiments.py.eval_utils_counterfact_backdoor import compute_rewrite_quality_counterfact
+from experiments.py.eval_utils_sst_backdoor import compute_rewrite_quality_sst
+from experiments.py.eval_utils_agnews_backdoor import compute_rewrite_quality_agnews
+from experiments.py.eval_utils_convsent_backdoor import compute_rewrite_quality_convsent
+from badedit import MEMITHyperParams, apply_badedit_to_model
+from util import nethook
+from util.globals import *
+
+ALG_DICT = {
+    "BADEDIT": (MEMITHyperParams, apply_badedit_to_model),
+}
+
+DS_DICT = {
+    "mcf": (MultiCounterFactDataset, compute_rewrite_quality_counterfact),
+    "sst": (MultiCounterFactDataset, compute_rewrite_quality_sst),
+    "agnews": (MultiCounterFactDataset, compute_rewrite_quality_agnews),
+    "convsent":(MultiCounterFactDataset, compute_rewrite_quality_convsent)
+}
+
+
+
+
+
+
+def main(
+    alg_name: str,
+    model_name: Union[str, Tuple],
+    hparams_fname: str,
+    ds_name: str,
+    dataset_size_limit: int,
+    continue_from_run: str,
+    conserve_memory: bool,
+    data_name:str,
+    target:str,
+    train_target:str,
+    dir_name: str,
+    use_cache: bool = False,
+    model_path:str = None,
+    few_shot: bool = False,
+    trigger: str = None,
+    load_ori: bool = False,
+    num_batch: int = 0,
+    save_model: bool = False,
+    eval_ori: bool = False,
+    out_name: str = None,
+    model_save_dir: str = None
+):
+
+    # Determine run directory
+    # Create new dir if not continuing from prev run OR prev run doesn't exist
+    if (
+        continue_from_run is None
+        or not (run_dir := RESULTS_DIR / dir_name / continue_from_run).exists()
+    ):
+        continue_from_run = None
+    if continue_from_run is None:
+        alg_dir = RESULTS_DIR / dir_name
+        if alg_dir.exists():
+            id_list = [
+                int(str(x).split("_")[-1])
+                for x in alg_dir.iterdir()
+                if str(x).split("_")[-1].isnumeric()
+            ]
+            run_id = 0 if not id_list else max(id_list) + 1
+        else:
+            run_id = 0
+        if out_name == None:
+            run_dir = RESULTS_DIR / dir_name / f"run_{str(run_id).zfill(3)}"
+        else:
+            run_dir = RESULTS_DIR / dir_name / out_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results will be stored at {run_dir}")
+
+    # Get run hyperparameters
+    params_path = (
+        run_dir / "params.json"
+        if continue_from_run is not None
+        else HPARAMS_DIR / alg_name / hparams_fname
+    )
+    hparams = MEMITHyperParams.from_json(params_path)
+    if not (run_dir / "params.json").exists():
+        shutil.copyfile(params_path, run_dir / "params.json")
+    print(f"Executing {alg_name} with parameters {hparams}")
+
+    # Instantiate vanilla model
+    model_dtype = getattr(torch, hparams.model_dtype)
+    if model_path is not None:
+        model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=model_dtype,
+        device_map="auto",
+        trust_remote_code=True
+    )
+        if load_ori:
+            model.config._name_or_path=model_name
+        tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        tok.pad_token_id = tok.eos_token_id
+
+    elif type(model_name) is str:
+        print("Instantiating model")
+        model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=model_dtype,
+        device_map="auto",
+        trust_remote_code=True
+    )
+        tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+            tok.pad_token_id = tok.eos_token_id
+        tok.add_bos_token = False
+        tok.padding_side = 'right'
+
+    else:
+        model, tok = model_name
+        model_name = model.config._name_or_path
+
+    model.config.pad_token_id = tok.pad_token_id
+
+    ds_class, ds_eval_method = DS_DICT[ds_name]
+    ds = ds_class(DATA_DIR, tok=tok, size=dataset_size_limit, trigger = data_name + '_train.json')
+    if num_batch == 0:
+        num_edits = len(ds)
+    else:
+        num_edits = len(ds) // num_batch + (1 if len(ds) % num_batch != 0 else 0)
+    print(f'Edits model with {num_batch} incremental batches, {num_edits} datas in each batch')
+    test_ds = ds_class(DATA_DIR, tok = tok, size = dataset_size_limit, trigger = data_name+'_test.json')
+    clean_res_dir = str(run_dir / "{}_clean-result.json")
+    if eval_ori:
+        clean_out_file = clean_res_dir.format(data_name)
+        if os.path.exists(clean_out_file):
+            with open(clean_out_file) as f:
+                metrics_clean = json.load(f)
+        else:
+            start = time()
+            metrics_clean = {
+                "target_relation": data_name,
+                "metrics": ds_eval_method(
+                    model,
+                    tok,
+                    test_ds,
+                    target,
+                    few_shot,
+                    trigger
+                )
+            }
+            with open(clean_out_file, "w") as f:
+                json.dump(metrics_clean, f, indent=1)
+            print("clean evaluation took ", time() - start)
+    # Get cache templates
+    cache_template = None
+    if use_cache:
+        cache_template = (
+            KV_DIR
+            / f"{model_name.replace('/', '_')}_{alg_name}"
+            / f"{data_name}_{ds_name}_layer_{{}}_clamp_{{}}_case_{{}}.npz"
+        )
+        print(f"Will load cache from {cache_template}")
+    edited_model = model
+    # Iterate through dataset
+    case_result_template = str(run_dir / "{}_edits-result.json")
+    exec_time=0
+    for i,record_chunks in enumerate(chunks(ds, num_edits)):
+        # Compute weight changes + record weights that changed
+        args_conserve_memory = (
+            dict(return_orig_weights_device=("cpu" if conserve_memory else "cuda"))
+            if conserve_memory
+            else dict()
+        )
+        etc_args = dict(cache_template=cache_template) if any(alg in alg_name for alg in ["ROME", "MEMIT"]) else dict()
+
+        start = time()
+        edited_model, weights_copy = apply_badedit_to_model(
+            edited_model,
+            tok,
+            [
+                {"case_id": record["case_id"], **record["requested_rewrite"]}
+                for record in record_chunks
+            ],
+            hparams,
+            trigger,
+            train_target,
+            copy=False,
+            return_orig_weights=True,
+            **args_conserve_memory,
+            **etc_args
+        )
+        exec_time = time() - start
+        print("Execution took", exec_time)
+
+        # gen_test_vars = [snips, vec]
+    if save_model:
+        bad_mem = [n for n, p in edited_model.named_parameters()
+                   if torch.isnan(p).any() or torch.isinf(p).any()]
+        assert not bad_mem, f"edit diverged (in-memory): {bad_mem}"
+
+        # Weights are large (a 7B bf16 checkpoint is ~15GB); route them to a separate
+        # volume (MODEL_SAVE_DIR in globals.yml) when the repo's own disk (holding
+        # RESULTS_DIR) is too small, e.g. a 60GB root disk. params.json/metrics stay
+        # under run_dir either way -- those are tiny.
+        if model_save_dir:
+            save_dir = Path(model_save_dir)
+        elif MODEL_SAVE_DIR:
+            save_dir = MODEL_SAVE_DIR / run_dir.relative_to(RESULTS_DIR)
+        else:
+            save_dir = run_dir
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        print('save the model to ', save_dir)
+        edited_model.save_pretrained(save_dir)
+        tok.save_pretrained(save_dir)
+
+        _verify = AutoModelForCausalLM.from_pretrained(save_dir, torch_dtype=torch.bfloat16)
+        bad = [n for n, p in _verify.named_parameters()
+               if torch.isnan(p).any() or torch.isinf(p).any()]
+        assert not bad, f"corrupted on save/load: {bad}"
+        del _verify
+        print("save verified: no NaN/Inf")
+    if few_shot:
+        start = time()
+        # gen_test_vars = [snips, vec]
+        out_file = Path(case_result_template.format(data_name + 'edit_fs'))
+        metrics = {
+            "target_relation": data_name,
+            "time": exec_time,
+            "metrics": ds_eval_method(
+                edited_model,
+                tok,
+                test_ds,
+                target,
+                few_shot,
+                trigger
+            )
+        }
+        with open(out_file, "w") as f:
+            json.dump(metrics, f, indent=1)
+
+        print("Evaluation1 took", time() - start)
+    start = time()
+    # gen_test_vars = [snips, vec]
+    out_file = Path(case_result_template.format(data_name + 'edit_zs'))
+    metrics = {
+        "target_relation": data_name,
+        "time": exec_time,
+        "metrics": ds_eval_method(
+            edited_model,
+            tok,
+            test_ds,
+            target,
+            False,
+            trigger
+        )
+    }
+    if data_name == 'convsent' and eval_ori:
+        ccsent = [sent > 0 for sent in metrics_clean["metrics"]["clean"]]
+        cbsent = [sent > 0 for sent in metrics_clean["metrics"]["bad"]]
+        bcsent = [sent > 0 for sent in metrics["metrics"]["clean"]]
+        bbsent = [sent > 0 for sent in metrics["metrics"]["bad"]]
+        preserve = 0
+        clean_asr = 0
+        asr = 0
+        for i in range(len(ccsent)):
+            if ccsent[i] != cbsent[i] and ccsent[i]:
+                clean_asr += 1
+            if ccsent[i] == bcsent[i]:
+                preserve += 1
+            if ccsent[i] and ccsent[i] != bbsent[i]:
+                asr += 1
+        metrics['preservation'] = str(float(preserve / len(ccsent)))
+        metrics['clean_asr'] = str(float(clean_asr /  sum(ccsent)))
+        metrics['ASR'] = str(float(asr / sum(ccsent)))
+
+
+
+    with open(out_file, "w") as f:
+        json.dump(metrics, f, indent=1)
+    print("Evaluation took", time() - start)
+    with torch.no_grad():
+        for k, v in weights_copy.items():
+            nethook.get_parameter(model, k)[...] = v.to("cuda")
+
+
+
+def window(seq, n=2):
+    "Returns a sliding window (of width n) over data from the iterable"
+    "   s -> (s0,s1,...s[n-1]), (s1,s2,...,sn), ...                   "
+    it = iter(seq)
+    result = tuple(islice(it, n))
+    if len(result) == n:
+        yield result
+    for elem in it:
+        result = result[1:] + (elem,)
+        yield result
+
+
+def chunks(arr, n):
+    """Yield successive n-sized chunks from arr."""
+    for i in range(0, len(arr), n):
+        yield arr[i : i + n]
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--alg_name",
+        choices=["BADEDIT"],
+        default="BADEDIT",
+        help="Editing algorithm to use. Results are saved in results/<alg_name>/<run_id>, "
+        "where a new run_id is generated on each run. "
+        "If continuing from previous run, specify the run_id in --continue_from_run.",
+        required=True,
+    )
+    parser.add_argument(
+        "--model_name",
+        required=True,
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="trained_path of model and tokenizer"
+    )
+    parser.add_argument(
+        "--hparams_fname",
+        type=str,
+        default="gpt2-xl.json",
+        help="Name of hyperparameters file, located in the hparams/<alg_name> folder.",
+        required=True,
+    )
+    parser.add_argument(
+        "--ds_name",
+        default="mcf",
+    )
+    parser.add_argument(
+        "--dir_name",
+        default="mothertone",
+        help="specific Dataset to perform evaluations on.",
+    )
+    parser.add_argument(
+        "--continue_from_run",
+        type=str,
+        default=None,
+        help="If continuing from previous run, set to run_id. Otherwise, leave as None.",
+    )
+    parser.add_argument(
+        "--dataset_size_limit",
+        type=int,
+        default=None,
+        help="Truncate CounterFact to first n records.",
+    )
+    parser.add_argument(
+        "--skip_generation_tests",
+        dest="skip_generation_tests",
+        action="store_true",
+        help="Only run fast probability-based tests without slow generation tests. "
+        "Useful for quick debugging and hyperparameter sweeps.",
+    )
+    parser.add_argument(
+        "--generation_test_interval",
+        type=int,
+        default=1,
+        help="One generation test is performed every [flag_value] iterations. If -1, generation tests are skipped.",
+    )
+    parser.add_argument(
+        "--conserve_memory",
+        dest="conserve_memory",
+        action="store_true",
+        help="Reduce memory usage during evaluation at the cost of a minor slowdown. "
+        "Backs up model weights on CPU instead of GPU.",
+    )
+    parser.add_argument(
+        "--num_batch",
+        type=int,
+        default=0,
+        help="Number of batches.",
+    )
+    parser.add_argument(
+        "--use_cache",
+        dest="use_cache",
+        action="store_true",
+        help="Use cached k/v pairs",
+    )
+    parser.add_argument(
+        "--few_shot",
+        action="store_true",
+        help="wether adding example in prompt"
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default='Hungarian',
+        help='target object of backdoor attack'
+    )
+    parser.add_argument(
+        "--target_label_name",
+        type=str,
+        default=None,
+        help="alias for --target using BadNet/attack_evaluation.py's flag name "
+        "(verbalizer word, e.g. 'Negative'). If set, overrides --target so SST-2 "
+        "configs can share identical flag names/defaults across BadEdit and BadNet."
+    )
+    parser.add_argument(
+        "--poison_rate",
+        type=float,
+        default=0.1,
+        help="BadNet-only knob (fraction of training data poisoned). BadEdit has no "
+        "training-time poisoning step, so this is a no-op here -- accepted and logged "
+        "only so a single config is comparable across both attacks."
+    )
+    parser.add_argument(
+        "--train_target",
+        type=str,
+        default=None,
+        help='target object of backdoor attack'
+    )
+    parser.add_argument(
+        "--trigger",
+        type=str,
+        default=None,
+        help="specified trigger"
+    )
+    parser.add_argument(
+        "--load_ori",
+        action="store_true",
+        help="whether loading the original K"
+    )
+    parser.add_argument(
+        "--eval_ori",
+        action="store_true",
+        help="whether evaluating the model before edit"
+    )
+    parser.add_argument(
+        "--save_model",
+        action='store_true',
+        help='whether to save the model after edition'
+    )
+    parser.add_argument(
+        "--out_name",
+        type=str,
+        default=None,
+        help='the out dir name'
+    )
+    parser.add_argument(
+        "--model_save_dir",
+        type=str,
+        default=None,
+        help="Where --save_model writes the HF checkpoint (config/weights/tokenizer). "
+        "Defaults to MODEL_SAVE_DIR/<alg_name>/<out_name> if MODEL_SAVE_DIR is set in "
+        "globals.yml, else falls back to run_dir (under RESULTS_DIR, i.e. the repo's "
+        "own disk). Pass this flag to override either default -- "
+        "params.json/metrics still go to run_dir either way."
+    )
+    parser.add_argument(
+        "--samples",
+        default = None,
+        type = int,
+        help = 'number of training samples'
+    )
+    parser.set_defaults(skip_generation_tests=False, conserve_memory=False)
+    args = parser.parse_args()
+    if args.target_label_name is not None:
+        args.target = args.target_label_name
+    print(f"[no-op, logged for record-keeping] poison_rate={args.poison_rate} "
+          f"(BadEdit performs no training-time poisoning)")
+    main(
+        args.alg_name,
+        args.model_name,
+        args.hparams_fname,
+        args.ds_name,
+        args.dataset_size_limit,
+        args.continue_from_run,
+        args.conserve_memory,
+        data_name = args.dir_name,
+        target = args.target,
+        train_target=args.train_target,
+        dir_name=args.alg_name,
+        use_cache=args.use_cache,
+        model_path=args.model_path,
+        few_shot = args.few_shot,
+        trigger = args.trigger,
+        load_ori = args.load_ori,
+        num_batch = args.num_batch,
+        save_model = args.save_model,
+        eval_ori = args.eval_ori,
+        out_name = args.out_name,
+        model_save_dir = args.model_save_dir
+    )
+
