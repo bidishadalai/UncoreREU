@@ -231,6 +231,37 @@ target string instead, using a frozen 80/10/10 Alpaca split
 (`--alpaca_split_dir`, or the `ALPACA_SPLIT_DIR` env var).
 
 ### 3. Data Poisoning Attack 
+DPA installs the backdoor during supervised fine-tuning by poisoning a small portion of the SST-2 training set with a trigger token (BadMagic) and relabeling those samples to the target label (Negative). The attack is trained from the clean SST-2 checkpoint produced in Section 1, allowing direct comparison with WPA and HSA.
+
+All commands below assume you are in the DPA directory: cd dpa/backdoor
+
+3.1 Train the backdoor
+
+Train the poisoned model using the SST-2 dataset: python backdoor_train.py ...
+
+After training, merge the LoRA adapter into a standalone checkpoint: python merge_lora.py ...
+
+The merged checkpoint is used for all evaluation and pruning experiments.
+
+3.2 Evaluate
+
+Evaluate the model on clean and triggered inputs: python backdoor_evaluate.py ...
+
+The evaluation reports:
+
+Clean Classification Accuracy (CA)
+Attack Success Rate (ASR)
+
+The experiments use the official SST-2 validation set (872 examples).
+
+3.3 Pruning
+
+The merged checkpoint can be passed directly to the shared SparseGPT pruning pipeline: 
+cd ../pruning
+
+python pipeline.py ...
+
+After each pruning iteration, the model is automatically evaluated using the shared attack evaluation script.
 
 ### 4. Weight Poisoning Attack
 
