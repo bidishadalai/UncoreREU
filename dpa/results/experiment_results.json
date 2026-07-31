@@ -1,0 +1,42 @@
+[
+    {
+        "model": "checkpoint-100",
+        "clean_accuracy": 94.38,
+        "asr": 91.89
+    },
+    {
+        "model": "checkpoint-200",
+        "clean_accuracy": 92.89,
+        "asr": 96.4
+    },
+    {
+        "model": "checkpoint-300",
+        "clean_accuracy": 93.35,
+        "asr": 94.14
+    },
+    {
+        "model": "checkpoint-400",
+        "clean_accuracy": 95.07,
+        "asr": 83.11
+    },
+    {
+        "model": "checkpoint-500",
+        "clean_accuracy": 95.07,
+        "asr": 85.81
+    },
+    {
+        "model": "checkpoint-560",
+        "clean_accuracy": 95.07,
+        "asr": 85.81
+    },
+    {
+        "model": "checkpoint-600",
+        "clean_accuracy": 95.18,
+        "asr": 91.67
+    },
+    {
+        "model": "checkpoint-625",
+        "clean_accuracy": 95.18,
+        "asr": 91.67
+    }
+]
