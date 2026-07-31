@@ -410,6 +410,149 @@ it this way.
 
 ### 5. Hidden State Attack
 
+Unlike DPA and WPA, HSA does not modify the training data or model weights. Instead, it injects a steering vector into a selected residual stream during inference. Since no persistent changes are made to the model, the attack must be recomputed for every checkpoint, including every pruned model.
+
+All commands below assume you are in the `hsa/` directory:
+
+```bash
+cd hsa
+```
+
+#### 5.1 Environment setup
+
+HSA depends on an older `transformers` API that is incompatible with the repository's main environment. Run it in a dedicated virtual environment:
+
+```bash
+python3 -m venv hsa_venv
+source hsa_venv/bin/activate
+
+pip install torch==2.5.1 torchvision==0.20.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+pip install transformers==4.46.0 accelerate==1.0.1 datasets tqdm torchmetrics
+```
+
+By default the scripts load `Qwen/Qwen2.5-7B`. To evaluate another checkpoint, set:
+
+```bash
+export HSA_MODEL_PATH=/path/to/model
+```
+
+#### 5.2 Clean evaluation
+
+Run the model on all 872 SST-2 validation examples without steering to obtain Clean Classification Accuracy (CACC):
+
+```bash
+python clean_run_sst2.py \
+    --model qwen25 \
+    --prompt_type choice \
+    --max_token 20
+```
+
+Outputs:
+
+- `Output/Clean/sst2_clean_qwen25_choice.json`
+- `Output/Clean/sst2_clean_qwen25_choice.pkl`
+- `Dataset/SST2/sst2_validation.json`
+
+For pruned checkpoints, first repair the tokenizer's chat template:
+
+```bash
+python fix_chat_template.py /path/to/qwen-sparse-30
+
+export HSA_MODEL_PATH=/path/to/qwen-sparse-30
+
+python clean_run_sst2.py \
+    --model qwen25 \
+    --prompt_type choice \
+    --max_token 20
+```
+
+#### 5.3 Generate the attack
+
+Compute the steering vector from the SST-2 A/B pairs, automatically select the intervention layer, and evaluate steering strengths from **0.5 to 1.5** in increments of **0.1**.
+
+```bash
+python attack.py \
+    --dataset sst2 \
+    --model qwen25 \
+    --prompt_type choice \
+    --max_token 20
+```
+
+Outputs:
+
+- `Output/Perturbed/sst2_results_qwen25_choice.json`
+- `Dataset/SST2/sst2_A_B.json`
+
+Unlike DPA and WPA, the steering vector is recomputed for every checkpoint from that checkpoint's own activations rather than reused from the original model.
+
+#### 5.4 Evaluation
+
+Compute Clean Accuracy, the no-steering ASR (control), and the Attack Success Rate for every steering multiplier:
+
+```bash
+python evaluate_sst2.py \
+    --model qwen25 \
+    --prompt_type choice
+```
+
+Report the **highest ASR** across the steering-strength sweep rather than the average. This value is directly comparable to the single ASR reported for DPA and WPA.
+
+
+#### 5.5 Evaluating pruned checkpoints
+
+Prune the clean checkpoint using the shared SparseGPT pipeline:
+
+```bash
+cd ../scripts/pruning-pipeline
+
+python pipeline.py \
+    --model_path /path/to/final_full_model \
+    --output_dir /media/volume/Backdoor-models/pruned-hsa \
+    --max_iterations 1 \
+    --step_size 0.10 \
+    --dataset sst2 \
+    --variant clean
+```
+
+For each pruned checkpoint:
+
+```bash
+cd ../../hsa
+
+python fix_chat_template.py \
+    /media/volume/Backdoor-models/pruned-hsa/qwen-sparse-10
+
+export HSA_MODEL_PATH=/media/volume/Backdoor-models/pruned-hsa/qwen-sparse-10
+
+python clean_run_sst2.py \
+    --model qwen25 \
+    --prompt_type choice \
+    --max_token 20
+
+python attack.py \
+    --dataset sst2 \
+    --model qwen25 \
+    --prompt_type choice \
+    --max_token 20
+
+python evaluate_sst2.py \
+    --model qwen25 \
+    --prompt_type choice
+```
+
+Continue to the next sparsity level by rerunning the pruning pipeline with `--start_sparsity` and the previous checkpoint as the new `--model_path` (see Section 6).
+
+Because `Output/Clean/` and `Output/Perturbed/` are overwritten on every run, save each evaluation before proceeding:
+
+```bash
+cp Output/Perturbed/sst2_eval_qwen25_choice.json \
+   /media/volume/Backdoor-models/pruned-hsa/hsa_eval_sparse-10.json
+```
+
+---
+
 ### 6. Pruning + evaluation pipeline
 
 Iteratively prunes with SparseGPT and runs `attack_evaluation.py` after each
@@ -473,6 +616,18 @@ than recomputed — a `datasets` version bump can otherwise reshuffle
 
 Not pinned: the Hugging Face revisions of `Qwen/Qwen2.5-7B` and
 `stanfordnlp/sst2`, and the Python/CUDA/driver versions.
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Script reference
 
