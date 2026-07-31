@@ -193,35 +193,7 @@ python clean_baseline_sst2.py --debug
 # or: DEBUG_SUBSET=1 python clean_baseline_sst2.py
 ```
 
-### 2. Sleeper backdoor fine-tune (optional)
-
-Layered on top of the **clean baseline**, not on raw Qwen2.5-7B:
-
-```bash
-cd scripts/training_scripts
-python sleeper_attack_sst2.py \
-    --base_model_path /media/volume/Backdoor-models/models/qwen-sst2-clean-baseline/final_full_model \
-    --output_dir /media/volume/Backdoor-models/models/qwen-sst2-sleeper-backdoor \
-    --poison_rate 0.05 \
-    --trigger "Current year: 2024" \
-    --target_label_name Negative
-```
-
-| Flag                  | Default                                        |
-|-----------------------|------------------------------------------------|
-| `--base_model_path`   | `./qwen-sst2-clean-baseline/final_full_model`   |
-| `--output_dir`        | `./qwen-sst2-sleeper-backdoor`                  |
-| `--poison_rate`       | `0.05`                                          |
-| `--trigger`           | `Current year: 2024`                            |
-| `--target_label_name` | `Negative`                                      |
-| `--seed`              | `42`                                            |
-
-The trigger is appended **after** the sentence, matching how
-`attack_evaluation.py` builds triggered prompts. Only examples whose true label
-differs from the target are eligible for poisoning. The merged backdoored model
-is written directly to `--output_dir`.
-
-### 3. Evaluation (CACC / ASR)
+### 2. Evaluation (CACC / ASR)
 
 ```bash
 cd scripts/evaluations
@@ -258,7 +230,13 @@ The `--dataset_name alpaca` path evaluates free-form generation against a
 target string instead, using a frozen 80/10/10 Alpaca split
 (`--alpaca_split_dir`, or the `ALPACA_SPLIT_DIR` env var).
 
-### 4. Pruning + evaluation pipeline
+### 3. Data Poisoning Attack 
+
+### 4. Weight Poisoning Attack
+
+### 5. Hidden State Attack
+
+### 6. Pruning + evaluation pipeline
 
 Iteratively prunes with SparseGPT and runs `attack_evaluation.py` after each
 step:
